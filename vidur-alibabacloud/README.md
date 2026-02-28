@@ -254,7 +254,11 @@ python -m vidur.main \
 | `--cluster_config_num_replicas` | 1 | Total number of replicas (i.e., data parallelism degree) |
 | `--replica_config_pd_node_ratio` | 0.5 | Ratio of P-nodes to  （P-nodes + D-nodes）    <font style="color:rgb(0, 0, 0);background-color:rgb(245, 242, 240);">Fraction of replicas allocated as prefill (P) nodes. The remaining replicas are used as decode (D) nodes. </font>   <font style="color:rgb(0, 0, 0);background-color:rgb(245, 242, 240);">For example, 0.5 means half of the replicas are prefill nodes and half are decode nodes (P:D = 1:1).</font> |
 | `--global_scheduler_config_type` | round_robin | Global scheduler type (`split_wise`, `round_robin`, etc.) |
-| `--replica_scheduler_config_type` | sarathi | Per-replica scheduler type |
+| `--replica_scheduler_config_type` | sarathi | Per-replica scheduler type (`sarathi`, `vllm`, `orca`, `lightllm`, `sglang`, `split_wise`, `faster_transformer`) |
+| `--sglang_scheduler_config_chunk_size` | 512 | Chunked-prefill chunk size for SGLang (tokens per chunk); only effective when `--replica_scheduler_config_type sglang` |
+| `--sglang_scheduler_config_enable_prefix_caching` | True | Enable RadixAttention-based prefix caching for SGLang; only effective when `--replica_scheduler_config_type sglang` |
+| `--sglang_scheduler_config_prefix_cache_hit_rate` | 0.0 | Fraction of prefill tokens that hit the prefix cache (0.0–1.0); see SGLang scheduler section for guidance; only effective when `--replica_scheduler_config_type sglang` |
+| `--sglang_scheduler_config_max_tokens_in_batch` | 4096 | Maximum total tokens per batch for SGLang; only effective when `--replica_scheduler_config_type sglang` |
 | `--replica_config_model_name` | meta-llama/Llama-2-7b-hf | Model name (DeepSeek-671B,  Qwen3-Moe-235B, Qwen3-Next-80B , etc.)<br/>⚠️ **Note**:  Vidur GPU Memory management module is still under adaptation for DeepSeek-671B,  Qwen3-Moe-235B, Qwen3-Next-80B |
 | `--replica_config_tensor_parallel_size` | 1 | Tensor parallelism size (TP) |
 | `--replica_config_num_pipeline_stages` | 1 | Number of pipeline stages (PP) |

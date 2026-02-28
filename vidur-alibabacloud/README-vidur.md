@@ -125,6 +125,69 @@ or to get information on all parameters,
 python -m vidur.main -h
 ```
 
+### SGLang scheduler (RadixAttention + chunked prefill)
+
+SimAI supports simulating [SGLang](https://github.com/sgl-project/sglang)'s runtime scheduler,
+which combines two key optimisations:
+
+| Feature | CLI parameter | Default |
+|---------|--------------|---------|
+| **Chunked prefill** – long prompts are split into fixed-size chunks, interleaving prefill and decode to reduce head-of-line blocking | `--sglang_scheduler_config_chunk_size` | `512` |
+| **RadixAttention prefix caching** – KV-cache blocks for shared prefixes (e.g. a system prompt) are reused across requests, reducing both memory allocation and the number of prefill chunks | `--sglang_scheduler_config_enable_prefix_caching` | `True` |
+| **Prefix cache hit rate** – fraction of prefill tokens satisfied by the prefix cache (set based on your workload; e.g. `0.7`–`0.9` for workloads with long shared system prompts) | `--sglang_scheduler_config_prefix_cache_hit_rate` | `0.0` |
+| **Max tokens per batch** | `--sglang_scheduler_config_max_tokens_in_batch` | `4096` |
+
+Example command (Llama-3-8B, simulating a workload where 70% of prefill tokens hit the prefix cache):
+
+```sh
+python -m vidur.main \
+  --replica_config_device a100 \
+  --replica_config_model_name meta-llama/Meta-Llama-3-8B \
+  --cluster_config_num_replicas 1 \
+  --replica_config_tensor_parallel_size 1 \
+  --replica_config_num_pipeline_stages 1 \
+  --request_generator_config_type synthetic \
+  --synthetic_request_generator_config_num_requests 512 \
+  --length_generator_config_type trace \
+  --trace_request_length_generator_config_max_tokens 16384 \
+  --trace_request_length_generator_config_trace_file ./data/processed_traces/splitwise_conv.csv \
+  --interval_generator_config_type poisson \
+  --poisson_request_interval_generator_config_qps 6.45 \
+  --replica_scheduler_config_type sglang \
+  --sglang_scheduler_config_chunk_size 512 \
+  --sglang_scheduler_config_enable_prefix_caching \
+  --sglang_scheduler_config_prefix_cache_hit_rate 0.7 \
+  --sglang_scheduler_config_max_tokens_in_batch 4096 \
+  --random_forrest_execution_time_predictor_config_prediction_max_prefill_chunk_size 16384 \
+  --random_forrest_execution_time_predictor_config_prediction_max_batch_size 512 \
+  --random_forrest_execution_time_predictor_config_prediction_max_tokens_per_request 16384
+```
+
+**How the simulation models SGLang behaviour**
+
+* *Chunked prefill* – identical to the Sarathi-Serve scheduler already in SimAI; each
+  scheduling iteration processes at most `chunk_size` new prefill tokens.
+
+* *Prefix-cache memory savings* – when `enable_prefix_caching=True` the scheduler allocates
+  only `ceil((1 − hit_rate) × num_prefill_tokens / block_size)` fresh KV blocks for each
+  new request.  The remaining blocks are treated as shared cache entries that require no new
+  allocation.  This allows more requests to fit in GPU memory concurrently, correctly
+  modelling SGLang's `RadixAttention` memory savings.
+
+* *Reduced prefill iterations* – the cached portion of a request's prompt is "fast-forwarded"
+  in the first scheduling iteration (the `num_processed_tokens` counter advances past the
+  cached portion at no extra execution cost), so the total number of chunked-prefill rounds
+  is reduced proportionally.
+
+**Choosing `prefix_cache_hit_rate`**
+
+| Workload characteristic | Suggested value |
+|------------------------|----------------|
+| No shared prefix (pure decode, random prompts) | `0.0` |
+| Short system prompt (≤ 5 % of prompt length) | `0.05`–`0.15` |
+| Medium system prompt / few-shot examples | `0.3`–`0.5` |
+| Long shared system prompt (≥ 70 % of prompt length) | `0.7`–`0.95` |
+
 ## Simulator Output
 
 * The metrics will be logged to wandb directly and a copy will be stored in the `simulator_output/<TIMESTAMP>` directory. __A description of all the logged metrics can be found [here](docs/metrics.md).__

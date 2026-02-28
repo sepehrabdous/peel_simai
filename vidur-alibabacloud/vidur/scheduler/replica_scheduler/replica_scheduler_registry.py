@@ -20,6 +20,9 @@ from vidur.utils.base_registry import BaseRegistry
 from vidur.scheduler.replica_scheduler.splitwise_replica_scheduler import (
     SplitwiseReplicaScheduler,
 )
+from vidur.scheduler.replica_scheduler.sglang_replica_scheduler import (
+    SglangReplicaScheduler,
+)
 
 class ReplicaSchedulerRegistry(BaseRegistry):
     pass
@@ -36,4 +39,7 @@ ReplicaSchedulerRegistry.register(
 )
 ReplicaSchedulerRegistry.register(
     ReplicaSchedulerType.SPLIT_WISE, SplitwiseReplicaScheduler
+)
+ReplicaSchedulerRegistry.register(
+    ReplicaSchedulerType.SGLANG, SglangReplicaScheduler
 )

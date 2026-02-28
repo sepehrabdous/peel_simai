@@ -343,6 +343,38 @@ class SplitWiseReplicaSchedulerConfig(BaseReplicaSchedulerConfig):
 
 
 @dataclass
+class SglangSchedulerConfig(BaseReplicaSchedulerConfig):
+    chunk_size: int = field(
+        default=512,
+        metadata={"help": "Chunked-prefill chunk size for SGLang (tokens per chunk)."},
+    )
+    enable_prefix_caching: bool = field(
+        default=True,
+        metadata={"help": "Enable RadixAttention-based prefix caching (SGLang feature)."},
+    )
+    prefix_cache_hit_rate: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Fraction of prefill tokens that hit the prefix cache (0.0–1.0). "
+                "Set based on your workload's prefix-sharing characteristics "
+                "(e.g. 0.7–0.9 for workloads with long shared system prompts). "
+                "Cached tokens reduce KV-block allocation, modelling SGLang's "
+                "RadixAttention memory savings."
+            )
+        },
+    )
+    max_tokens_in_batch: int = field(
+        default=4096,
+        metadata={"help": "Maximum total tokens per batch for SGLang."},
+    )
+
+    @staticmethod
+    def get_type():
+        return ReplicaSchedulerType.SGLANG
+
+
+@dataclass
 class MetricsConfig:
     """Metric configuration."""
 

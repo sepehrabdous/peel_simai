@@ -8,3 +8,4 @@ class ReplicaSchedulerType(BaseIntEnum):
     VLLM = 4
     LIGHTLLM = 5
     SPLIT_WISE= 6
+    SGLANG = 7
