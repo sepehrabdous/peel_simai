@@ -175,7 +175,7 @@ $  ./bin/SimAI_analytical -w ./example/workload_analytical.txt -g 9216  -nv 360 
 $ python3 ./astra-sim-alibabacloud/inputs/topo/gen_Topo_Template.py -topo Spectrum-X -g 128 -gt A100 -bw 100Gbps -nvbw 2400Gbps
 
 # Running
-$ AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/microAllReduce.txt -ingleToR_512g_8gps_100Gbps_A100 -c astra-sim-alibabacloud/inputs/config/SimAI.conf
+$ AS_SEND_LAT=3 AS_NVLS_ENABLE=1 ./bin/SimAI_simulator -t 8 -w ./example/microAllReduce.txt -n ./DCN+SingleToR_512g_8gps_100Gbps_A100 -c astra-sim-alibabacloud/inputs/config/SimAI.conf
 ```
 
 ## Use Multi-requests Inference Simulation
