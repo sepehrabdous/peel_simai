@@ -291,6 +291,7 @@ def Rail_Opti_DualToR_DualPlane(parameters):
                 f.write('\n')
 
 def No_Rail_Opti_SingleToR(parameters):
+    print('No_Rail_Opti_SingleToR called!')
     nodes_per_asw = parameters['nics_per_aswitch']
     asw_switch_num_per_segment = 1
     if(parameters['gpu'] % (nodes_per_asw * asw_switch_num_per_segment) == 0):
@@ -319,6 +320,7 @@ def No_Rail_Opti_SingleToR(parameters):
         file_name = "DCN+SingleToR_"+str(parameters['gpu'])+"g_"+str(parameters['gpu_per_server'])+"gps_"+parameters['bandwidth']+"_"+parameters['gpu_type']
     else:
         file_name = "No_Rail_Opti_"+str(parameters['gpu'])+"g_"+str(parameters['gpu_per_server'])+"gps_SingleToR_"+parameters['bandwidth']+"_"+parameters['gpu_type']
+    
     with open(file_name, 'w') as f:
         print(file_name)
         first_line = str(nodes)+" "+str(parameters['gpu_per_server'])+" "+str(nv_switch_num)+" "+str(switch_nodes-nv_switch_num)+" "+str(int(links))+" "+str(parameters['gpu_type'])
@@ -330,6 +332,12 @@ def No_Rail_Opti_SingleToR(parameters):
         dsw_switch = []
         sec_line = ""
         nnodes = nodes - switch_nodes
+
+        # hovering over the switch nodes (with switch IDs)
+        # first IDs are assigned to gpus
+        # then nv switches
+        # then asw switches (leafs)
+        # then psw switches (spines)
         for i in range(nnodes, nodes):
             sec_line = sec_line + str(i) + " "
             if len(nv_switch) < nv_switch_num:
@@ -347,6 +355,9 @@ def No_Rail_Opti_SingleToR(parameters):
         group_num = 0
         group_account = 0
         ind_nv = 0
+        # connecting all gpus to correct nv switch idx and physical switch idx
+        # one line gpu --> nvswitch
+        # one line gpu --> physical switch
         for i in range(parameters['gpu']):
             curr_node = curr_node + 1
             if curr_node > parameters['gpu_per_server']:
@@ -591,11 +602,58 @@ def analysis_template(args, default_parameters):
     ]
     for key in parameter_keys:
         parameters[key] = getattr(args, key, None) if getattr(args, key, None) is not None else default_parameters[key]
-    # for key, value in parameters.items():
-    #     print(f'{key}: {value}')
-    # print("==================================")
+    
+    print("Workload parameters:")
+    for key, value in parameters.items():
+        print(f'{key}: {value}')
+    print("==================================")
     return parameters
 
 
 if __name__ =='__main__':
     main()
+
+
+'''
+Example command(s) 
+
+    parser.add_argument('-topo','--topology', type=str, default=None,help='Template for AlibabaHPN, Spectrum-X, DCN+')
+    parser.add_argument('--ro', action='store_true',help='use rail-optimized structure')
+    parser.add_argument('--dt',action='store_true', help='enable dual ToR, only for DCN+')
+    parser.add_argument('--dp', action='store_true', help='enable dual_plane, only for AlibabaHPN')
+    parser.add_argument('-g','--gpu',type=int,default=None,help='gpus num, default 32')
+    parser.add_argument('-er','--error_rate',type=str,default=None,help='error_rate, default 0')
+    #Intra-Host Parameters:
+    parser.add_argument('-gps','--gpu_per_server',type=int,default=None,help='gpu_per_server, default 8')
+    parser.add_argument('-gt','--gpu_type',type=str,default=None,help='gpu_type, default H100')
+    parser.add_argument('-nsps','--nv_switch_per_server',type=int,default=None,help='nv_switch_per_server, default 1')
+    parser.add_argument('-nvbw','--nvlink_bw',type=str,default=None,help='nvlink_bw, default 2880Gbps')
+    parser.add_argument('-nl','--nv_latency',type=str,default=None,help='nv switch latency, default 0.000025ms')
+    parser.add_argument('-l','--latency',type=str,default=None,help='nic latency, default 0.0005ms')
+    #Intra-Segment Parameters:
+    parser.add_argument('-bw','--bandwidth',type=str,default=None,help='nic to asw bandwidth, default 400Gbps')
+    parser.add_argument('-asn','--asw_switch_num',type=int,default=None,help='asw_switch_num, default 8')
+    parser.add_argument('-npa','--nics_per_aswitch',type=int,default=None,help='nnics per asw, default 64')
+    #Intra-Pod Parameters:
+    parser.add_argument('-psn','--psw_switch_num',type=int,default=None,help='psw_switch_num, default 64')
+    parser.add_argument('-apbw','--ap_bandwidth',type=str,default=None,help='asw to psw bandwidth,default 400Gbps')   
+    parser.add_argument('-app','--asw_per_psw',type=int,default=None,help='asw for psw')
+
+DCN+ (32 tors, 16 spines, two servers per tor, 8 gpus per server)
+
+python3 ./astra-sim-alibabacloud/inputs/topo/gen_Topo_Template.py -topo DCN+ -g 512 -gps 8 -gt A100 -bw 100Gbps -nvbw 7200Gbps
+
+python3 ./astra-sim-alibabacloud/inputs/topo/gen_Topo_Template.py \
+  -topo DCN+ \
+  -g 512 \
+  -gps 8 \
+  -asn 32 \
+  -psn 16 \
+  -npa 16 \
+  -app 32 \
+  -bw 100Gbps \
+  -apbw 100Gbps \
+  -gt A100 \
+  -nvbw 7200Gbps
+
+'''
