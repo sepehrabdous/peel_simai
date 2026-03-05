@@ -37,6 +37,14 @@ GeneralComplexTopology::GeneralComplexTopology(
     std::vector<CollectiveImplementation*> collective_implementation) {
   int offset = 1;
   int last_dim = collective_implementation.size() - 1;
+
+  if (id == 0 && !collective_implementation.empty()) {
+    std::cout << "collective_implementation[0]->type: "
+              << static_cast<std::underlying_type_t<AstraSim::CollectiveImplementationType>>(
+                  collective_implementation[0]->type)
+              << std::endl;
+  }
+
   for (int dim = 0; dim < collective_implementation.size(); dim++) {
     if (collective_implementation[dim]->type ==
             CollectiveImplementationType::Ring ||

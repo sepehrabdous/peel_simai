@@ -375,12 +375,14 @@ int main1(string network_topo,string network_conf) {
   clock_t begint, endt;
   begint = clock();
 
-  if (!ReadConf(network_topo,network_conf))
+  if (!ReadConf(network_topo,network_conf)) {
+    std::cerr << "ReadConf returned false!" << endl;
     return -1;
+  }
   SetConfig();
   SetupNetwork(qp_finish,send_finish);
 
-std::cout << "Running Simulation.\n";
+  std::cout << "Running Simulation." << std::endl;
   fflush(stdout);
   NS_LOG_INFO("Run Simulation.");
 

@@ -119,6 +119,9 @@ std::vector<Ipv4Address> serverAddress;
 
 std::unordered_map<uint32_t, unordered_map<uint32_t, uint16_t>> portNumber;
 
+// Sepehr
+enum NODE_TYPE {node_type_server = 0, node_type_physicalswitch, node_type_nvswitch};
+
 struct Interface {
   uint32_t idx;
   bool up;
@@ -451,13 +454,15 @@ string get_output_file_name(string config_file, string output_file){
 
 uint64_t get_nic_rate(NodeContainer &n) {
   for (uint32_t i = 0; i < n.GetN(); i++)
-    if (n.Get(i)->GetNodeType() == 0)
+    if (n.Get(i)->GetNodeType() == node_type_server)
       return DynamicCast<QbbNetDevice>(n.Get(i)->GetDevice(1))
           ->GetDataRate()
           .GetBitRate();
 }
 
 bool ReadConf(string network_topo,string network_conf) {
+
+    std::cout << "ReadConf called!" << endl;
 
     std::ifstream conf;
     conf.open(network_conf);
@@ -666,6 +671,9 @@ bool ReadConf(string network_topo,string network_conf) {
 }
 
 void SetConfig() {
+  
+  std::cout << "SetConfig called!" << endl;
+
   bool dynamicth = use_dynamic_pfc_threshold;
 
   Config::SetDefault("ns3::QbbNetDevice::PauseTime", UintegerValue(pause_time));
@@ -692,6 +700,12 @@ void SetConfig() {
 }
 
 void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_finish)(FILE *, Ptr<RdmaQueuePair>)) {
+  
+  std::cout << "SetupNetwork called!" << endl;
+
+  std::cout << "topology_file is " << topology_file << std::endl;
+  std::cout << "flow_file is " << flow_file << std::endl;
+  std::cout << "trace_file is " << trace_file << std::endl;
 
   topof.open(topology_file.c_str());
   flowf.open(flow_file.c_str());
@@ -714,40 +728,56 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
     gpu_type = GPUType::NONE;
   }
 
-  std::vector<uint32_t> node_type(node_num, 0);
+  std::cout << "config:" << std::endl <<
+    "\tnode_num: " << node_num << std::endl << 
+    "\tgpus_per_server: " << gpus_per_server << std::endl << 
+    "\tnvswitch_num: " << nvswitch_num << std::endl << 
+    "\tswitch_num: " << switch_num << std::endl << 
+    "\tlink_num: " << link_num << std::endl << 
+    "\tgpu_type_str: " << gpu_type_str << std::endl << 
+    "\tflow_num: " << flow_num << std::endl << 
+    "\ttrace_num: " << trace_num << std::endl;
+
+  // create the type of all nodes (first initialized to server but then they are over-written)
+  std::vector<uint32_t> node_type(node_num, node_type_server);
   for (uint32_t i = 0; i < nvswitch_num; i++) {
     uint32_t sid;
     topof >> sid;
-    node_type[sid] = 2;
+    node_type[sid] = node_type_nvswitch;
 	}
 	for (uint32_t i = 0; i < switch_num; i++)
 	{
 		uint32_t sid;
 		topof >> sid;
-		node_type[sid] = 1;
+		node_type[sid] = node_type_physicalswitch;
 	}
+
+  std::cout << "Switches support ECN? " << enable_qcn << std::endl;
+
+  // add all nodes to n which is a nodecontainer
 	for (uint32_t i = 0; i < node_num; i++){
-		if (node_type[i] == 0)
+		if (node_type[i] == node_type_server)
 			n.Add(CreateObject<Node>());
-		else if(node_type[i] == 1){
+		else if(node_type[i] == node_type_physicalswitch){
 			Ptr<SwitchNode> sw = CreateObject<SwitchNode>();
 			n.Add(sw);
 			sw->SetAttribute("EcnEnabled", BooleanValue(enable_qcn));
-		}else if(node_type[i] == 2){
+		}else if(node_type[i] == node_type_nvswitch){
 			Ptr<NVSwitchNode> sw = CreateObject<NVSwitchNode>();
 			n.Add(sw);
 		}
 	}
 
   NS_LOG_INFO("Create nodes.");
+
   InternetStackHelper internet;
   internet.Install(n);
 
   for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 0) {
+    if (n.Get(i)->GetNodeType() == node_type_server) {
       serverAddress.resize(i + 1);
       serverAddress[i] = node_id_to_ip(i);
-    } else if(n.Get(i)->GetNodeType() == 2) {
+    } else if(n.Get(i)->GetNodeType() == node_type_nvswitch) {
       serverAddress.resize(i + 1);
       serverAddress[i] = node_id_to_ip(i);
     }
@@ -840,7 +870,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
 
   nic_rate = get_nic_rate(n);
   for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 1) { 
+    if (n.Get(i)->GetNodeType() == node_type_physicalswitch) { 
       Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n.Get(i));
       uint32_t shift = 3; 
 
@@ -869,7 +899,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
       sw->m_mmu->ConfigNPort(sw->GetNDevices() - 1);
       sw->m_mmu->ConfigBufferSize(buffer_size * 1024 * 1024);
       sw->m_mmu->node_id = sw->GetId();
-    } else if(n.Get(i)->GetNodeType() == 2){ 
+    } else if(n.Get(i)->GetNodeType() == node_type_nvswitch){ 
 			Ptr<NVSwitchNode> sw = DynamicCast<NVSwitchNode>(n.Get(i));
       uint32_t shift = 3; 
       for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
@@ -896,7 +926,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   FILE *fct_output = fopen(fct_output_file.c_str(), "w");
   FILE *send_output = fopen(send_output_file.c_str(), "w");
   for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 0 || n.Get(i)->GetNodeType() == 2) { 
+    if (n.Get(i)->GetNodeType() == node_type_server || n.Get(i)->GetNodeType() == node_type_nvswitch) { 
       Ptr<RdmaHw> rdmaHw = CreateObject<RdmaHw>();
       rdmaHw->SetAttribute("ClampTargetRate", BooleanValue(clamp_target_rate));
       rdmaHw->SetAttribute("AlphaResumInterval",
@@ -973,7 +1003,7 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
   printf("maxRtt=%lu maxBdp=%lu\n", maxRtt, maxBdp);
 
   for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 1) { 
+    if (n.Get(i)->GetNodeType() == node_type_physicalswitch) { 
       Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n.Get(i));
       sw->SetAttribute("CcMode", UintegerValue(cc_mode));
       sw->SetAttribute("MaxRtt", UintegerValue(maxRtt));
@@ -1015,9 +1045,9 @@ void SetupNetwork(void (*qp_finish)(FILE *, Ptr<RdmaQueuePair>),void (*send_fini
 
   Time interPacketInterval = Seconds(0.0000005 / 2);
   for (uint32_t i = 0; i < node_num; i++) {
-    if (n.Get(i)->GetNodeType() == 0 || n.Get(i)->GetNodeType() == 2)
+    if (n.Get(i)->GetNodeType() == node_type_server || n.Get(i)->GetNodeType() == node_type_nvswitch)
       for (uint32_t j = 0; j < node_num; j++) {
-        if (n.Get(j)->GetNodeType() == 0 || n.Get(j)->GetNodeType() == 2)
+        if (n.Get(j)->GetNodeType() == node_type_server || n.Get(j)->GetNodeType() == node_type_nvswitch)
           portNumber[i][j] = 10000; 
       }
   }

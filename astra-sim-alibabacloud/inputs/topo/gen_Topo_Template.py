@@ -615,29 +615,6 @@ if __name__ =='__main__':
 
 
 '''
-Example command(s) 
-
-    parser.add_argument('-topo','--topology', type=str, default=None,help='Template for AlibabaHPN, Spectrum-X, DCN+')
-    parser.add_argument('--ro', action='store_true',help='use rail-optimized structure')
-    parser.add_argument('--dt',action='store_true', help='enable dual ToR, only for DCN+')
-    parser.add_argument('--dp', action='store_true', help='enable dual_plane, only for AlibabaHPN')
-    parser.add_argument('-g','--gpu',type=int,default=None,help='gpus num, default 32')
-    parser.add_argument('-er','--error_rate',type=str,default=None,help='error_rate, default 0')
-    #Intra-Host Parameters:
-    parser.add_argument('-gps','--gpu_per_server',type=int,default=None,help='gpu_per_server, default 8')
-    parser.add_argument('-gt','--gpu_type',type=str,default=None,help='gpu_type, default H100')
-    parser.add_argument('-nsps','--nv_switch_per_server',type=int,default=None,help='nv_switch_per_server, default 1')
-    parser.add_argument('-nvbw','--nvlink_bw',type=str,default=None,help='nvlink_bw, default 2880Gbps')
-    parser.add_argument('-nl','--nv_latency',type=str,default=None,help='nv switch latency, default 0.000025ms')
-    parser.add_argument('-l','--latency',type=str,default=None,help='nic latency, default 0.0005ms')
-    #Intra-Segment Parameters:
-    parser.add_argument('-bw','--bandwidth',type=str,default=None,help='nic to asw bandwidth, default 400Gbps')
-    parser.add_argument('-asn','--asw_switch_num',type=int,default=None,help='asw_switch_num, default 8')
-    parser.add_argument('-npa','--nics_per_aswitch',type=int,default=None,help='nnics per asw, default 64')
-    #Intra-Pod Parameters:
-    parser.add_argument('-psn','--psw_switch_num',type=int,default=None,help='psw_switch_num, default 64')
-    parser.add_argument('-apbw','--ap_bandwidth',type=str,default=None,help='asw to psw bandwidth,default 400Gbps')   
-    parser.add_argument('-app','--asw_per_psw',type=int,default=None,help='asw for psw')
 
 DCN+ (32 tors, 16 spines, two servers per tor, 8 gpus per server)
 

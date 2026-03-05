@@ -139,6 +139,7 @@ Sys::Sys(
     std::vector<int>_all_gpus,
     std::vector<int>_NVSwitchs,
     int _ngpus_per_node) {
+
   scheduler_unit = nullptr;
   vLevels = nullptr;
   memBus = nullptr;
@@ -209,6 +210,11 @@ Sys::Sys(
   int element = 0;
   all_queues = 0;
   total_nodes = 1;
+
+  /*
+    when the simulator “creates streams” (NCCL-like rings, chunks, etc.), it can push work onto these per-queue lists and schedule them with priorities.
+  */
+
   for (int current_dim = 0; current_dim < queues_per_dim.size();
        current_dim++) {
     all_queues += queues_per_dim[current_dim];
@@ -239,6 +245,9 @@ Sys::Sys(
       (int)std::ceil(((double)active_chunks_per_dimension) / queues_per_dim[0]);
   active_first_phase = 100000000;
   if (id == 0) {
+    std::cout << "Sys: " << id << std::endl;
+    std::cout << "Creating queues across dimenssions. boost_mode active? " << boost_mode << std::endl;
+    std::cout << "active_chunks_per_dimension: " << active_chunks_per_dimension << std::endl;
     std::cout
         << "The final active chunks per dimension 1 after allocating to queues is: "
         << concurrent_streams * queues_per_dim[0] << std::endl;
@@ -251,13 +260,24 @@ Sys::Sys(
       active_first_phase,
       concurrent_streams);
   vLevels = new QueueLevels(queues_per_dim, 0, NI->get_backend_type());
-
+  
+  if (id == 0)
+    std::cout << "Initiating AllReduce logical topology!" << std::endl;
   logical_topologies["AllReduce"] = new GeneralComplexTopology(
       id, physical_dims, all_reduce_implementation_per_dimension);
+      
+  if (id == 0)
+    std::cout << "Initiating ReduceScatter logical topology!" << std::endl;
   logical_topologies["ReduceScatter"] = new GeneralComplexTopology(
       id, physical_dims, reduce_scatter_implementation_per_dimension);
+  
+  if (id == 0)
+    std::cout << "Initiating AllGather logical topology!" << std::endl;
   logical_topologies["AllGather"] = new GeneralComplexTopology(
       id, physical_dims, all_gather_implementation_per_dimension);
+
+  if (id == 0)
+    std::cout << "Initiating AllGather logical topology!" << std::endl;
   logical_topologies["AllToAll"] = new GeneralComplexTopology(
       id, physical_dims, all_to_all_implementation_per_dimension);
   stream_counter = 0;

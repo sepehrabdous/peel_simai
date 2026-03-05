@@ -254,6 +254,13 @@ static int user_param_prase(int argc,char * argv[],struct user_param* user_param
       return 1;
     }
   }
+
+  std::cout << "user_params parsed:" << std::endl << 
+    "\t num_threads: " << user_param->thread << std::endl <<
+    "\t workload: " << user_param->workload << std::endl <<
+    "\t topology: " << user_param->network_topo << std::endl <<
+    "\t config: " << user_param->network_conf << std::endl;
+
   return 0 ;
 }
 
@@ -286,13 +293,17 @@ int main(int argc, char *argv[]) {
   LogComponentEnable("PacketSink", LOG_LEVEL_INFO);
   LogComponentEnable("GENERIC_SIMULATION", LOG_LEVEL_INFO);
 
+  std::cout << "nodes_num (num_gpus + num_nv_switches): " << nodes_num << std::endl;
+  std::cout << "gpu_num: " << gpu_num << std::endl;
+
   std::vector<ASTRASimNetwork *> networks(nodes_num, nullptr);
   std::vector<AstraSim::Sys *> systems(nodes_num, nullptr);
 
+  std::cout << "Initiating ASTRASimNetwork and AstraSim::Sys" << std::endl;
   for (int j = 0; j < nodes_num; j++) {
     networks[j] =
         new ASTRASimNetwork(j ,0);
-    systems[j ] = new AstraSim::Sys(
+    systems[j] = new AstraSim::Sys(
         networks[j], 
         nullptr,                  
         j,                        
@@ -319,6 +330,8 @@ int main(int argc, char *argv[]) {
     systems[j ]->nvswitch_id = node2nvswitch[j];
     systems[j ]->num_gpus = nodes_num - nvswitch_num;
   }
+
+  std::cout << "Firing the workloads" << std::endl;
   for (int i = 0; i < nodes_num; i++) {
     systems[i]->workload->fire();
   }
