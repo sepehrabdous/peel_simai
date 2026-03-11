@@ -35,6 +35,19 @@ Workload::Workload(
     int stat_row,
     std::string path,
     bool seprate_log) {
+
+  if (generator->id == 0) {
+    std::cout
+        << "\nInitiating Workload with inputs:\n"
+        << "\t run_name: " << run_name << "\n"
+        << "\t name: " << name << "\n"
+        << "\t TOTAL_PASS: " << TOTAL_PASS << "\n"
+        << "\t total_rows: " << total_rows << "\n"
+        << "\t stat_row: " << stat_row << "\n"
+        << "\t path: " << path << "\n"
+        << "\t seprate_log: " << seprate_log << "\n";
+  }   
+
   this->initialized = false;
   this->layers = nullptr;
   this->SIZE = 0;
@@ -61,6 +74,7 @@ Workload::Workload(
   this->total_rows = total_rows;
   this->run_name = run_name;
   this->registered_for_finished_streams = false;
+
   #ifndef PHY_MTP
   if (generator->id == 0 && seprate_log) {
     std::cout << "stat path: " << path << " ,total rows: " << total_rows
@@ -75,6 +89,7 @@ Workload::Workload(
   }
   #endif
 }
+
 void Workload::initialize_stat_files() {
   #ifdef NS3_MPI
   detailed->initialize_csv(SIZE * total_rows + 20, 50);
@@ -84,39 +99,67 @@ void Workload::initialize_stat_files() {
   #endif
   end_to_end->initialize_csv(SIZE * total_rows + 20, 50);
 }
+
 void Workload::call(EventType event, CallData* data) {
+
+  if (generator->id == 0) {
+      std::cout << "counter: " << counter << std::endl;
+  }
+
   if (counter > 0) {
-    if(generator->id == 0) std::cout << "counter > 0" << std::endl;
     generator->try_register_event(
         this, EventType::Workload_Wait, NULL, counter);
     return;
   }
+
   if (parallelismPolicy == ParallelismPolicy::Data) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::Data" << std::endl;
     iterate_data_parallel();
   } else if (parallelismPolicy == ParallelismPolicy::Transformer) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::Transformer" << std::endl;
     iterate_hybrid_parallel_Transformer();
   } else if (
       parallelismPolicy == ParallelismPolicy::DLRM ||
       parallelismPolicy == ParallelismPolicy::DLRMEnhanced) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::DLRM || ParallelismPolicy::DLRMEnhanced" << std::endl;
     iterate_hybrid_parallel_DLRM();
   } else if (parallelismPolicy == ParallelismPolicy::MicroBenchmark) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::MicroBenchmark" << std::endl;
     iterate_micro_benchmark();
   } else if (parallelismPolicy == ParallelismPolicy::Model) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::Model" << std::endl;
     iterate_model_parallel();
   } else if (parallelismPolicy == ParallelismPolicy::HybridDataModel) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::HybridDataModel" << std::endl;
     iterate_hybrid_parallel_data_model();
   } else if (parallelismPolicy == ParallelismPolicy::HybridModelData) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::HybridModelData" << std::endl;
     iterate_hybrid_parallel_model_data();
   } else if (parallelismPolicy == ParallelismPolicy::DistributedInference) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::DistributedInference" << std::endl;
     iterate_distributed_inference();
   } else if (parallelismPolicy == ParallelismPolicy::TransformerFwdInBckwd) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::TransformerFwdInBckwd" << std::endl;
     iterate_hybrid_parallel_Transformer_fwd_in_bckwd();
   } else if (parallelismPolicy == ParallelismPolicy::HybridCustomized) {
+    if (generator->id == 0)
+      std::cout << "parallelismPolicy == ParallelismPolicy::HybridCustomized" << std::endl;
     iterate_hybrid_parallel_customized();
   } else {
     Sys::sys_panic("No known parallelism!");
   }
+
 }
+
 void Workload::report() {
   double total_compute = 0;
   double total_exposed = 0;
@@ -229,6 +272,10 @@ void Workload::check_for_sim_end() {
   return;
 }
 void Workload::iterate_micro_benchmark() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_micro_benchmark called!" << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   if (current_state != LoopState::Wait_For_Sim_Finish) {
@@ -239,7 +286,12 @@ void Workload::iterate_micro_benchmark() {
   }
   check_for_sim_end();
 }
+
 void Workload::iterate_data_parallel() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_data_parallel called!" << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -307,6 +359,14 @@ void Workload::iterate_data_parallel() {
   }
 }
 void Workload::iterate_hybrid_parallel_customized() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_hybrid_parallel_customized called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -397,6 +457,14 @@ void Workload::iterate_hybrid_parallel_customized() {
   }
 }
 void Workload::iterate_hybrid_parallel_data_model() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_hybrid_parallel_data_model called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -486,7 +554,16 @@ void Workload::iterate_hybrid_parallel_data_model() {
     return;
   }
 }
+
 void Workload::iterate_hybrid_parallel_model_data() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_hybrid_parallel_model_data called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -576,7 +653,16 @@ void Workload::iterate_hybrid_parallel_model_data() {
     return;
   }
 }
+
 void Workload::iterate_distributed_inference() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_distributed_inference called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -610,7 +696,16 @@ void Workload::iterate_distributed_inference() {
     return;
   }
 }
+
 void Workload::iterate_model_parallel() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_model_parallel called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -697,7 +792,16 @@ void Workload::iterate_model_parallel() {
     return;
   }
 }
+
 void Workload::iterate_hybrid_parallel_Transformer() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_hybrid_parallel_Transformer called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -788,17 +892,30 @@ void Workload::iterate_hybrid_parallel_Transformer() {
     return;
   }
 }
+
 void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_hybrid_parallel_Transformer_fwd_in_bckwd called!" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t delay_loaded: " << delay_loaded  << std::endl << 
+       "\t counter: " << counter  << std::endl << 
+       "\t collective_issued: " << collective_issued << std::endl;
+
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
   if (current_state == LoopState::Forward_Pass) {
     if (!layers[index]->is_weight_grad_comm_finished_blocking()) {
+      if (generator->id == 0)
+        std::cout << "is_weight_grad_comm_finished_blocking returned false!" << std::endl;
       return;
     }
     if (delay_loaded == false) {
       counter = layers[index]->get_fwd_pass_compute();
+      if (generator->id == 0)
+        std::cout << "counter updated to " << counter << " which is the fwd_pass_compute_time" << std::endl;
       delay_loaded = true;
     }
     if (counter > 0) {
@@ -927,7 +1044,13 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
     return;
   }
 }
+
 void Workload::iterate_hybrid_parallel_DLRM() {
+
+  if (generator->id == 0)
+    std::cout << "iterate_hybrid_parallel_DLRM called:" << std::endl << 
+       "\t current_state: " << static_cast<int>(current_state)  << std::endl;
+
   assert(index >= 0);
   assert(index < SIZE);
   check_for_sim_end();
@@ -1043,7 +1166,12 @@ int Workload::get_layer_numbers(std::string workload_input) {
   inFile.close();
   return layers;
 }
+
 ParallelismPolicy Workload::decode_parallelsim(std::string parallelism) {
+
+  if (generator->id == 0)
+    std::cout << "decode_parallelsim called. input parallelism: " << parallelism << std::endl;
+
   if (parallelism == "DATA")
     return ParallelismPolicy::Data;
   else if (parallelism == "HYBRID_TRANSFORMER")
@@ -1069,6 +1197,7 @@ ParallelismPolicy Workload::decode_parallelsim(std::string parallelism) {
   else
     return ParallelismPolicy::None;
 }
+
 std::map<std::string, std::vector<bool>> Workload::decode_involved_dimensions(
     ParallelismPolicy policy,
     int model_parallel_npu_group) {
@@ -1131,6 +1260,7 @@ std::map<std::string, std::vector<bool>> Workload::decode_involved_dimensions(
   }
   return result;
 }
+
 bool Workload::initialize_workload(std::string name) {
   std::map<int, bool> chekpoints;
   std::map<int, bool> need_checkpoint_initiation;
@@ -1151,18 +1281,18 @@ bool Workload::initialize_workload(std::string name) {
   }
  std::string firstline;
   std::getline(inFile,firstline);
-  // std::cout << "First line is : '" << firstline << "'" << std::endl;
+  if (generator->id == 0)
+    std::cout << "First line is : '" << firstline << "'" << std::endl;
   std::istringstream iss(firstline);
   std:string token;
   std::vector<std::string> tokens;
   // bool findparallesimPolcy = false;
   
   while (iss >> token) {
-        tokens.push_back(token);
-        // std::cout << "Token is : '" << token << "'" << std::endl;
-    }
-
-
+      tokens.push_back(token);
+      if (generator->id == 0)
+        std::cout << "Token is : '" << token << "'" << std::endl;
+  }
 
   if(!tokens.empty()){
     parallelismPolicy = decode_parallelsim(tokens[0]);
@@ -1170,88 +1300,90 @@ bool Workload::initialize_workload(std::string name) {
 
   if (parallelismPolicy == ParallelismPolicy::TransformerFwdInBckwd ||
       parallelismPolicy == ParallelismPolicy::Transformer) {
-        for (size_t i = 1; i < tokens.size(); i = i+1){
-          if(tokens[i]=="model_parallel_NPU_group:"){
-            model_parallel_npu_group = std::stoi(tokens[i+1]);
+    for (size_t i = 1; i < tokens.size(); i = i+1) {
+      if(tokens[i]=="model_parallel_NPU_group:"){
+        model_parallel_npu_group = std::stoi(tokens[i+1]);
+        if (generator->id == 0) {
+          std::cout <<"model_parallel_NPU_group is " << model_parallel_npu_group << std::endl;
+        }
+      }else if(tokens[i]=="ep:"){
+        expert_parallel_npu_group = std::stoi(tokens[i+1]);
+      }else if(tokens[i]== "pp:"){
+        pipeline_model_parallelism = std::stoi(tokens[i+1]);
+      }else if(tokens[i]=="vpp:"){
+        vpp = std::stoi(tokens[i+1]);
+      }else if(tokens[i]=="ga:"){
+        GA = std::stoi(tokens[i+1]);
+      }else if(tokens[i]=="all_gpus:"){
+        all_gpus = std::stoi(tokens[i+1]);
+      }
+    }
+
+    if(parallelismPolicy == ParallelismPolicy::TransformerFwdInBckwd) {
+      if (generator->id == 0) {
+        std::cout << "checkpoints layers are: ";
+      }
+      for(size_t i = 1; i < tokens.size(); i = i+1) {
+        if(tokens[i]=="checkpoints:"){
+          int account = std::stoi(tokens[i+1]);
+          while(account-- >0){
+            int j = 2;
+            int layer = std::stoi(tokens[i+j]);
+            chekpoints[layer] = true;
             if (generator->id == 0) {
-              std::cout <<"model_parallel_NPU_group is " << model_parallel_npu_group << std::endl;
+              std::cout << layer << ", ";
             }
-          }else if(tokens[i]=="ep:"){
-            expert_parallel_npu_group = std::stoi(tokens[i+1]);
-          }else if(tokens[i]== "pp:"){
-            pipeline_model_parallelism = std::stoi(tokens[i+1]);
-          }else if(tokens[i]=="vpp:"){
-            vpp = std::stoi(tokens[i+1]);
-          }else if(tokens[i]=="ga:"){
-            GA = std::stoi(tokens[i+1]);
-          }else if(tokens[i]=="all_gpus:"){
-            all_gpus = std::stoi(tokens[i+1]);
+            j++;
+          }
+            
+        } else if(tokens[i]=="checkpoint_initiates:") {
+          if (generator->id == 0) {
+            std::cout << std::endl;
+            std::cout << "layers initiating fwd_in_bckwd are: ";
+          }
+          int account = std::stoi(tokens[i+1]);
+          while(account-- > 0) {
+            int j = 2;
+            int layer = std::stoi(tokens[i+j]);
+            need_checkpoint_initiation[layer] = true;
+            if (generator->id == 0) {
+              std::cout << layer << ", ";
+            }
+            j++;
+          }
+          if (generator->id == 0) {
+            std::cout << std::endl;
           }
         }
-
-        if(parallelismPolicy == ParallelismPolicy::TransformerFwdInBckwd){
-          if (generator->id == 0) {
-            std::cout << "checkpoints layers are: ";
-          }
-          for(size_t i = 1; i < tokens.size(); i = i+1){
-            if(tokens[i]=="checkpoints:"){
-              int account = std::stoi(tokens[i+1]);
-              while(account-- >0){
-                int j = 2;
-                int layer = std::stoi(tokens[i+j]);
-                chekpoints[layer] = true;
-                if (generator->id == 0) {
-                  std::cout << layer << ", ";
-                }
-                j++;
-              }
-                
-            }else if(tokens[i]=="checkpoint_initiates:"){
-                if (generator->id == 0) {
-                  std::cout << std::endl;
-                  std::cout << "layers initiating fwd_in_bckwd are: ";
-                }
-                int account = std::stoi(tokens[i+1]);
-                while(account-- >0){
-                  int j = 2;
-                  int layer = std::stoi(tokens[i+j]);
-                  need_checkpoint_initiation[layer] = true;
-                  if (generator->id == 0) {
-                    std::cout << layer << ", ";
-                  }
-                  j++;
-                }
-                if (generator->id == 0) {
-                  std::cout << std::endl;
-                }
-              }
-            }
-          }
-      }else if(parallelismPolicy == ParallelismPolicy::DLRM ||
-                parallelismPolicy == ParallelismPolicy::DLRMEnhanced){
-                  for (size_t i = 1; i < tokens.size(); i = i+1){
-                    if(tokens[i]=="DLRM_LAST_BOTTOM_LAYER:"){
-                      DLRM_LAST_BOTTOM_LAYER = std::stoi(tokens[i+1]);
-                    }
-                  }
-                if (generator->id == 0) {
-                  std::cout
-                  << "****************** info: DLRM workload last bottom layer is: "
-                  << DLRM_LAST_BOTTOM_LAYER << std::endl;
-                }
-        }else if (parallelismPolicy == ParallelismPolicy::None) {
-          #ifndef PHY_MTP
-          std::cerr << "######### Exiting because unable to decode the workload "
-                 "parallelization strategy #########"
-                  << std::endl;
-          inFile.close();
-          exit(1);
-          #else
-          parallelismPolicy = ParallelismPolicy::TransformerFwdInBckwd;
-          #endif
+      }
+    }
+  } else if(parallelismPolicy == ParallelismPolicy::DLRM ||
+            parallelismPolicy == ParallelismPolicy::DLRMEnhanced) {
+    for (size_t i = 1; i < tokens.size(); i = i+1) {
+      if(tokens[i]=="DLRM_LAST_BOTTOM_LAYER:"){
+        DLRM_LAST_BOTTOM_LAYER = std::stoi(tokens[i+1]);
+      }
+    }
+    if (generator->id == 0) {
+      std::cout
+      << "****************** info: DLRM workload last bottom layer is: "
+      << DLRM_LAST_BOTTOM_LAYER << std::endl;
+    }
+  } else if (parallelismPolicy == ParallelismPolicy::None) {
+      #ifndef PHY_MTP
+      std::cerr << "######### Exiting because unable to decode the workload "
+              "parallelization strategy #########"
+              << std::endl;
+      inFile.close();
+      exit(1);
+      #else
+      parallelismPolicy = ParallelismPolicy::TransformerFwdInBckwd;
+      #endif
   }
+  
   std::map<std::string, std::vector<bool>> general_involved_dimensions =
       decode_involved_dimensions(parallelismPolicy, model_parallel_npu_group);
+      
   pp_commsize = 0;
   for (size_t i = 1; i < tokens.size(); i = i+1){
     if(tokens[i]=="pp_comm"||tokens[i]=="pp_comm:"){
@@ -1259,7 +1391,7 @@ bool Workload::initialize_workload(std::string name) {
     }
   }
   if (generator->id == 0) {
-      std::cout <<"pp_commize:"<< pp_commsize << std::endl;
+      std::cout <<"pp_commsize:"<< pp_commsize << std::endl;
   }
   if(generator->id == 0){
     if (model_parallel_npu_group == 0 || expert_parallel_npu_group == 0 || pipeline_model_parallelism == 0 
@@ -1306,6 +1438,22 @@ bool Workload::initialize_workload(std::string name) {
     inFile >> wg_comm_size;
     Tick wg_update_time;
     inFile >> wg_update_time;
+
+    if (generator->id == 0) {
+      std::cout << "\nRead workload info from file line " << i << ":\n" <<
+        "\tid: " << id << "\n" <<
+        "\tdepen: " << depen << "\n" <<
+        "\tfp_compute_time: " << fp_compute_time << "\n" <<
+        "\tfp_comm_type_s: " << fp_comm_type_s << "\n" <<
+        "\tfp_comm_size: " << fp_comm_size << "\n" <<
+        "\tig_compute_time: " << ig_compute_time << "\n" <<
+        "\tg_comm_type_s: " << ig_comm_type_s << "\n" <<
+        "\tig_comm_size: " << ig_comm_size << "\n" <<
+        "\twg_compute_time: " << wg_compute_time << "\n" <<
+        "\twg_comm_type_s: " << wg_comm_type_s << "\n" <<
+        "\twg_comm_size: " << wg_comm_size << "\n" <<
+        "\twg_update_time: " << wg_update_time << "\n";
+    }
 
     ParallelismPolicy specific_policy = ParallelismPolicy::None;
     std::map<std::string, std::vector<bool>> selected_involved_dimensions;
@@ -1491,6 +1639,7 @@ bool Workload::initialize_workload(std::string name) {
       std::cout << "id: " << id << " , depen: " << depen
                 << " , wg_comp_time: " << wg_compute_time << std::endl;
     }
+    
     if (parallelismPolicy == ParallelismPolicy::HybridCustomized) {
       std::string specific_parallelsim;
       inFile >> specific_parallelsim;
@@ -1539,10 +1688,10 @@ bool Workload::initialize_workload(std::string name) {
     layers[i] = l;
   }
   if (generator->id == 0) {
-    std::cout << "type: " << run_type << " ,num passes: " << TOTAL_PASS
-              << " ,lines: " << lines
-              << " compute scale: " << generator->compute_scale
-              << " ,comm scale: " << generator->comm_scale << std::endl;
+    std::cout << "type: " << run_type << ", num passes: " << TOTAL_PASS
+              << ", lines: " << lines
+              << ", compute scale: " << generator->compute_scale
+              << ", comm scale: " << generator->comm_scale << std::endl;
   }
   inFile.close();
   return true;

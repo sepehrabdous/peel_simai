@@ -140,6 +140,31 @@ Sys::Sys(
     std::vector<int>_NVSwitchs,
     int _ngpus_per_node) {
 
+  if (id == 0) {
+    std::cout
+        << "\nInitiating Sys with inputs:\n"
+        << "\t id: " << id << "\n"
+        << "\t npu_offset: " << npu_offset << "\n"
+        << "\t num_passes: " << num_passes << "\n"
+        << "\t physical_dims.size(): " << physical_dims.size() << "\n"
+        << "\t queues_per_dim.size(): " << queues_per_dim.size() << "\n"
+        << "\t my_sys: " << my_sys << "\n"
+        << "\t my_workload: " << my_workload << "\n"
+        << "\t comm_scale: " << comm_scale << "\n"
+        << "\t compute_scale: " << compute_scale << "\n"
+        << "\t injection_scale: " << injection_scale << "\n"
+        << "\t total_stat_rows: " << total_stat_rows << "\n"
+        << "\t stat_row: " << stat_row << "\n"
+        << "\t path: " << path << "\n"
+        << "\t run_name: " << run_name << "\n"
+        << "\t seprate_log: " << seprate_log << "\n"
+        << "\t rendezvous_enabled: " << rendezvous_enabled << "\n"
+        << "\t _gpu_type: " << static_cast<int>(_gpu_type) << "\n"
+        << "\t _all_gpus.size(): " << _all_gpus.size() << "\n"
+        << "\t _NVSwitchs.size(): " << _NVSwitchs.size() << "\n"
+        << "\t _ngpus_per_node: " << _ngpus_per_node << "\n";
+  }
+
   scheduler_unit = nullptr;
   vLevels = nullptr;
   memBus = nullptr;
@@ -195,6 +220,7 @@ Sys::Sys(
   inp_reduce_scatter_implementation = "NcclFlowModel";
   inp_all_to_all_implementation = "NcclFlowModel";
   inp_collective_optimization = "baseline";
+
   bool result = post_process_inputs();
 
   if (result == false) {
@@ -245,8 +271,7 @@ Sys::Sys(
       (int)std::ceil(((double)active_chunks_per_dimension) / queues_per_dim[0]);
   active_first_phase = 100000000;
   if (id == 0) {
-    std::cout << "Sys: " << id << std::endl;
-    std::cout << "Creating queues across dimenssions. boost_mode active? " << boost_mode << std::endl;
+    std::cout << "Creating queues across dimenssions." << std::endl;
     std::cout << "active_chunks_per_dimension: " << active_chunks_per_dimension << std::endl;
     std::cout
         << "The final active chunks per dimension 1 after allocating to queues is: "
@@ -280,6 +305,7 @@ Sys::Sys(
     std::cout << "Initiating AllGather logical topology!" << std::endl;
   logical_topologies["AllToAll"] = new GeneralComplexTopology(
       id, physical_dims, all_to_all_implementation_per_dimension);
+
   stream_counter = 0;
   if (id == 0) {
     std::atexit(exiting);
@@ -302,6 +328,7 @@ Sys::Sys(
       model_shared_bus,
       communication_delay,
       true);
+
   workload = new Workload(
       run_name,
       this,
@@ -316,6 +343,7 @@ Sys::Sys(
         "Unable to initialize the workload layer because it can not open the workload file");
     return;
   }
+
   #if defined(NS3_MTP) || defined(NS3_MPI) || defined(PHY_MTP)
   result = mock_nccl_grobal_group_init();
   if(result == false) {
@@ -832,6 +860,19 @@ bool Sys::parse_var(std::string var, std::string value) {
   return true;
 }
 bool Sys::post_process_inputs() {
+
+  if (id == 0) {
+    std::cout << "post_process_inputs called that adds implementation per dimenssion for different collectives:" << std::endl << 
+      "\t inp_all_reduce_implementation --> " << inp_all_reduce_implementation << std::endl <<
+      "\t inp_reduce_scatter_implementation --> " << inp_reduce_scatter_implementation << std::endl <<
+      "\t inp_all_gather_implementation --> " << inp_all_gather_implementation << std::endl <<
+      "\t inp_all_to_all_implementation --> " << inp_all_to_all_implementation << std::endl <<
+      "\t inp_collective_optimization --> " << inp_collective_optimization << std::endl <<
+      "\t inp_boost_mode --> " << inp_boost_mode << std::endl <<
+      "\t inp_scheduling_policy --> " << inp_scheduling_policy << std::endl << 
+      "\t inp_model_shared_bus --> " << inp_model_shared_bus << std::endl;
+  }
+  
   all_reduce_implementation_per_dimension =
       generate_collective_implementation_from_input(
           inp_all_reduce_implementation);
@@ -884,6 +925,7 @@ bool Sys::post_process_inputs() {
   }
   return true;
 }
+
 bool Sys::initialize_sys(std::string name) {
   std::ifstream inFile;
   inFile.open(name);
@@ -1051,6 +1093,14 @@ DataSet* Sys::generate_all_reduce(
     int layer,
     EventType event,
     Callable* layer_ptr) {
+
+  if (id == 0)
+      std::cout << "generate_all_reduce called:" << std::endl << 
+        "\t size: " << size << std::endl << 
+        "\t involved_dimensions.size: " << involved_dimensions.size() << std::endl <<
+        "\t layer: " << layer << std::endl <<
+        "\t event: " << static_cast<int>(event) << std::endl;
+  
   return generate_collective(
       size,
       layer,
@@ -1062,6 +1112,7 @@ DataSet* Sys::generate_all_reduce(
       event,
       layer_ptr);
 }
+
 DataSet* Sys::generate_all_gather(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1069,6 +1120,14 @@ DataSet* Sys::generate_all_gather(
     int layer,
     EventType event,
     Callable* layer_ptr) {
+
+  if (id == 0)
+      std::cout << "generate_all_gather called:" << std::endl << 
+        "\t size: " << size << std::endl << 
+        "\t involved_dimensions.size: " << involved_dimensions.size() << std::endl <<
+        "\t layer: " << layer << std::endl <<
+        "\t event: " << static_cast<int>(event) << std::endl;
+
   return generate_collective(
       size,
       layer,
@@ -1080,6 +1139,7 @@ DataSet* Sys::generate_all_gather(
       event,
       layer_ptr);
 }
+
 DataSet* Sys::generate_reduce_scatter(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1087,6 +1147,14 @@ DataSet* Sys::generate_reduce_scatter(
     int layer,
     EventType event,
     Callable* layer_ptr) {
+
+  if (id == 0)
+      std::cout << "generate_reduce_scatter called:" << std::endl << 
+        "\t size: " << size << std::endl << 
+        "\t involved_dimensions.size: " << involved_dimensions.size() << std::endl <<
+        "\t layer: " << layer << std::endl <<
+        "\t event: " << static_cast<int>(event) << std::endl;
+
   return generate_collective(
       size,
       layer,
@@ -1098,6 +1166,7 @@ DataSet* Sys::generate_reduce_scatter(
       event,
       layer_ptr);
 }
+
 DataSet* Sys::generate_all_to_all(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1105,6 +1174,14 @@ DataSet* Sys::generate_all_to_all(
     int layer,
     EventType event,
     Callable* layer_ptr) {
+
+  if (id == 0)
+      std::cout << "generate_all_to_all called:" << std::endl << 
+        "\t size: " << size << std::endl << 
+        "\t involved_dimensions.size: " << involved_dimensions.size() << std::endl <<
+        "\t layer: " << layer << std::endl <<
+        "\t event: " << static_cast<int>(event) << std::endl;
+
   return generate_collective(
       size,
       layer,
@@ -1116,6 +1193,7 @@ DataSet* Sys::generate_all_to_all(
       event,
       layer_ptr);
 }
+
 CollectivePhase Sys::generate_collective_phase(
     ComType collective_type,
     int layer_num,
@@ -1126,6 +1204,19 @@ CollectivePhase Sys::generate_collective_phase(
     InjectionPolicy injection_policy,
     CollectiveImplementation* collective_implementation,
     bool boost_mode) {
+
+        if (id == 0)
+          std::cout << "generate_collective_phase called:" << std::endl << 
+            "\tcollective_type: " << static_cast<int>(collective_type) << std::endl <<
+            "\tlayer_num: " << layer_num << std::endl << 
+            "\tdata_size: " << data_size << std::endl << 
+            "\tqueue_id: " << queue_id << std::endl << 
+            "\tdirection: " << static_cast<int>(direction) << std::endl <<
+            "\tinjection_policy: " << static_cast<int>(injection_policy) << std::endl <<
+            "\tcollective_implementation->type: " << static_cast<int>(collective_implementation->type) << std::endl <<
+            "\tworkload->current_state: " << static_cast<int>(workload->current_state) << std::endl <<
+            "\tboost_mode: " << boost_mode << std::endl;
+
         MockNcclLog* NcclLog = MockNcclLog::getInstance();
 
         if (collective_implementation->type == CollectiveImplementationType::Ring ||
@@ -1448,8 +1539,13 @@ DataSet* Sys::generate_collective(
     SchedulingPolicy pref_scheduling,
     EventType event,
     Callable* layer_ptr ) {
+
+  if (id == 0)
+      std::cout << "generate_collective called... Info:" << std::endl;
+
   uint64_t chunk_size = determine_chunk_size(size, collective_type);
-  if(id == 0) std::cout << "chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl;
+  if(id == 0) 
+    std::cout << "\t chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl;
   uint64_t recommended_chunk_size = chunk_size;
   int streams = ceil(((double)size) / chunk_size);
   int64_t tmp;
@@ -1460,6 +1556,15 @@ DataSet* Sys::generate_collective(
   }
   #endif
   int pri = get_priority(pref_scheduling);
+  if (id == 0) {
+    std::cout << "\t Priority: " << pri << std::endl;
+    std::cout << "\ttopology->get_num_of_dimensions: " << topology->get_num_of_dimensions() << std::endl;
+    std::cout << "\tinter_dimension_scheduling: " << static_cast<int>(inter_dimension_scheduling) << std::endl;
+    std::cout << "\tlast_scheduled_collective: " << static_cast<int>(last_scheduled_collective) << std::endl;
+    std::cout << "\tcollective_type: " << static_cast<int>(collective_type) << std::endl;
+    std::cout << "\tcollectiveOptimization: " << static_cast<int>(collectiveOptimization) << std::endl;
+  }
+
   int count = 0;
   if (id == 0 &&
       (inter_dimension_scheduling == InterDimensionScheduling::OfflineGreedy ||
@@ -1513,6 +1618,10 @@ DataSet* Sys::generate_collective(
              InterDimensionScheduling::OfflineGreedyFlex)) {
       size -= chunk_size;
     }
+
+    if (id == 0)
+      std::cout << "chunk size: " << chunk_size << ", remaining size: " << size << std::endl;
+
     tmp = chunk_size;
     std::list<CollectivePhase> vect;
     CollectivePhase phase;
@@ -1970,6 +2079,12 @@ void Sys::try_register_event(
     EventType event,
     CallData* callData,
     Tick& cycles) {
+
+  if (id == 0)
+    std::cout << "try_register_event called!" << std::endl << 
+       "\t event: " << static_cast<int>(event)  << std::endl << 
+       "\t cycles: " << cycles  << std::endl;
+
   bool should_schedule = false;
   {
     MockNcclLog* NcclLog = MockNcclLog::getInstance();

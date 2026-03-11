@@ -20,10 +20,9 @@ RingTopology::RingTopology(
   }
   if (id == 0) {
     std::cout << "ring of node 0, "
-              << "id: " << id << " dimension: " << name
-              << " total nodes in ring: " << total_nodes_in_ring
-              << " index in ring: " << index_in_ring << " offset: " << offset
-              << "total nodes in ring: " << total_nodes_in_ring << std::endl;
+              << "id: " << id << ", dimension: " << name
+              << ", total nodes in ring: " << total_nodes_in_ring
+              << ", index in ring: " << index_in_ring << ", offset: " << offset << std::endl;
   }
   this->id = id;
   this->total_nodes_in_ring = total_nodes_in_ring;

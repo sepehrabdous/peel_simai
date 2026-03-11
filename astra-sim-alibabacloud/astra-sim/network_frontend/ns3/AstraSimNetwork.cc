@@ -327,16 +327,16 @@ int main(int argc, char *argv[]) {
         NVswitchs,
         gpus_per_server
     );
-    systems[j ]->nvswitch_id = node2nvswitch[j];
-    systems[j ]->num_gpus = nodes_num - nvswitch_num;
+    systems[j]->nvswitch_id = node2nvswitch[j];
+    systems[j]->num_gpus = nodes_num - nvswitch_num;
   }
 
-  std::cout << "Firing the workloads" << std::endl;
+  std::cout << "\nFiring the workloads" << std::endl;
   for (int i = 0; i < nodes_num; i++) {
     systems[i]->workload->fire();
   }
-  std::cout << "simulator run " << std::endl;
 
+  std::cout << "\nNow, let's run the simulation..." << std::endl;
   Simulator::Run();
   Simulator::Stop(Seconds(2000000000));
   Simulator::Destroy();

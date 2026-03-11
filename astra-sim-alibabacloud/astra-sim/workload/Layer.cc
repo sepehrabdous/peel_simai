@@ -1053,6 +1053,12 @@ void Layer::issue_forward_pass_comm(
     SchedulingPolicy pref_scheduling,
     CollectiveBarrier barrier) {
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
+
+  if (generator->id == 0)
+      std::cout << "issue_forward_pass_comm called:" << std::endl << 
+        "\t SchedulingPolicy: " << static_cast<int>(pref_scheduling) << std::endl << 
+        "\t barrier: " << static_cast<int>(barrier) << std::endl;
+
   #ifdef ANALYTI
     fwd_barrier = barrier;
     if (generator->id == 0){
