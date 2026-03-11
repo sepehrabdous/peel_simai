@@ -1518,6 +1518,18 @@ bool Workload::initialize_workload(std::string name) {
       } else{
         wg_group_type = MockNccl::GroupType::NONE;
       }
+    } else if (wg_comm_type_s.substr(0,9) == "BROADCAST") {
+      // sepehr
+      wg_type = ComType::Broadcast;
+      if (wg_comm_type_s == "BROADCAST") {
+        wg_group_type = MockNccl::GroupType::DP;
+      } else if (wg_comm_type_s == "BROADCAST_EP") {
+        wg_group_type = MockNccl::GroupType::EP;
+      } else if (wg_comm_type_s == "BROADCAST_DP_EP") {
+        wg_group_type = MockNccl::GroupType::DP_EP;
+      } else {
+        wg_group_type = MockNccl::GroupType::NONE;
+      }
     }
 
     // generate flow model
@@ -1577,6 +1589,18 @@ bool Workload::initialize_workload(std::string name) {
       } else{
         ig_group_type = MockNccl::GroupType::NONE;
       }
+    } else if (ig_comm_type_s.substr(0,9) == "BROADCAST") {
+      // sepehr
+      ig_type = ComType::Broadcast;
+      if (ig_comm_type_s == "BROADCAST") {
+        ig_group_type = MockNccl::GroupType::TP;
+      } else if (ig_comm_type_s == "BROADCAST_EP") {
+        ig_group_type = MockNccl::GroupType::EP;
+      } else if (ig_comm_type_s == "BROADCAST_DP_EP") {
+        ig_group_type = MockNccl::GroupType::DP_EP;
+      } else {
+        ig_group_type = MockNccl::GroupType::NONE;
+      }
     }
 
     if (fp_comm_type_s.substr(0,9) == "ALLREDUCE") {
@@ -1634,7 +1658,20 @@ bool Workload::initialize_workload(std::string name) {
       } else{
         fp_group_type = MockNccl::GroupType::NONE;
       }
+    } else if (fp_comm_type_s.substr(0,9) == "BROADCAST") {
+      // sepehr
+      fp_type = ComType::Broadcast;
+      if (fp_comm_type_s == "BROADCAST") {
+        fp_group_type = MockNccl::GroupType::TP;
+      } else if (fp_comm_type_s == "BROADCAST_EP") {
+        fp_group_type = MockNccl::GroupType::EP;
+      } else if (fp_comm_type_s == "BROADCAST_DP_EP") {
+        fp_group_type = MockNccl::GroupType::DP_EP;
+      } else {
+        fp_group_type = MockNccl::GroupType::NONE;
+      }
     }
+
     if (generator->id == 0) {
       std::cout << "id: " << id << " , depen: " << depen
                 << " , wg_comp_time: " << wg_compute_time << std::endl;

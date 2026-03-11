@@ -892,6 +892,8 @@ char* comtype_to_coll(ComType comtype) {
             return "all_reduce_all_to_all";
         case ComType::All_Reduce_NVLS:
             return "all_reduce_nvls";
+        case ComType::Broadcast:  // sepehr
+          return "broadcast";
         default:
             return "unknown";
     }
@@ -908,10 +910,16 @@ float Layer::cal_ratio(
     auto nic_ratio_data = generator->nic_ratio_data;
     auto nvlink_ratio_data = generator->nvlink_ratio_data;
     auto ata_ratio_data = generator->ata_ratio_data;
-    if ((strcmp(coll_type, "allgather") == 0 || strcmp(coll_type, "reducescatter") == 0 ) && group_type == MockNccl::GroupType::TP){
-        auto data = is_nvlink ? nvlink_ratio_data : nic_ratio_data;
+    // sepehr
+    if ((strcmp(coll_type, "allgather") == 0 || 
+        strcmp(coll_type, "reducescatter") == 0 || 
+        strcmp(coll_type, "broadcast") == 0) && 
+        group_type == MockNccl::GroupType::TP){
+        
+          auto data = is_nvlink ? nvlink_ratio_data : nic_ratio_data;
         int _temp_nnode = (tp_size < gpus_per_server) ? 1 : tp_size / gpus_per_server ;
         return getValue(data_size, _temp_nnode, data);
+    
     } else if (strcmp(coll_type, "alltoall") == 0 && group_type == MockNccl::GroupType::EP){
         auto data = ata_ratio_data;
         if(tp_size * nranks <= gpus_per_server){
@@ -1040,7 +1048,9 @@ std::pair<float,float> Layer::compute_busbw(ComType comtype, int nranks, uint64_
   if (comtype == ComType::All_Reduce) {
     busbw = algbw * 2 * (nranks - 1) / (nranks / 1.0);
   } else if (
-      comtype == ComType::All_Gather || comtype == ComType::Reduce_Scatter ||
+      comtype == ComType::All_Gather || 
+      comtype == ComType::Reduce_Scatter ||
+      comtype == ComType::Broadcast ||  // sepehr
       comtype == ComType::All_to_All) {
     busbw = algbw * (nranks - 1) / (nranks / 1.0);
   } else {
@@ -1578,6 +1588,42 @@ void Layer::issue_weight_grad_comm(
       std::cout
           << "info: reduce-scatter weight grad collective issued for layer: "
           << id << ",";
+      print_involved_dimensions(weight_grad_comm_involved_dimensions);
+    }
+  } else if (weight_grad_comm_type == ComType::Broadcast) {
+    // sepehr
+    #ifdef PHY_MTP
+      wg = generator->generate_broadcast(
+          weight_grad_comm_size,
+          weight_grad_comm_involved_dimensions,
+          pref_scheduling,
+          layer_num,
+          EventType::Wight_Grad_Comm_Finished,
+          this);
+    #else
+      wg = generator->generate_broadcast(
+          weight_grad_comm_size,
+          weight_grad_comm_involved_dimensions,
+          pref_scheduling,
+          layer_num);
+    #endif
+
+    if (!wg->active) {
+      if (generator->id == 0) {
+        std::cout << "info: all dims disabled, no weight grad collective for layer: "
+                  << id << std::endl;
+      }
+      collective_counter--;
+      delete wg;
+      if (barrier == CollectiveBarrier::Blocking) {
+        workload->call(EventType::General, NULL);
+      }
+      return;
+    }
+
+    if (generator->id == 0) {
+      std::cout << "info: broadcast weight grad collective issued for layer: "
+                << id << " with size: " << weight_grad_comm_size << ",";
       print_involved_dimensions(weight_grad_comm_involved_dimensions);
     }
   } else if (weight_grad_comm_type == ComType::None) {

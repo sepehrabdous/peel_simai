@@ -220,7 +220,7 @@ Sys::Sys(
   inp_all_gather_implementation = "NcclFlowModel";
   inp_reduce_scatter_implementation = "NcclFlowModel";
   inp_all_to_all_implementation = "NcclFlowModel";
-  inp_broadcast_implementation = "NcclFlowModel"; //sepehr
+  inp_broadcast_implementation = "ring"; //sepehr
   inp_collective_optimization = "baseline";
 
   bool result = post_process_inputs();
