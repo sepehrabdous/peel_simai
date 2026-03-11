@@ -22,6 +22,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/collective/NcclTreeFlowModel.hh"
 #include "astra-sim/system/scheduling/OfflineGreedy.hh"
 #include "astra-sim/system/topology/BasicLogicalTopology.hh"
+#include "astra-sim/system/collective/RingBroadcast.hh" // sepehr
 #include "astra-sim/system/topology/DoubleBinaryTreeTopology.hh"
 #include "astra-sim/system/topology/GeneralComplexTopology.hh"
 #include "astra-sim/system/topology/LocalRingGlobalBinaryTree.hh"
@@ -219,6 +220,7 @@ Sys::Sys(
   inp_all_gather_implementation = "NcclFlowModel";
   inp_reduce_scatter_implementation = "NcclFlowModel";
   inp_all_to_all_implementation = "NcclFlowModel";
+  inp_broadcast_implementation = "NcclFlowModel"; //sepehr
   inp_collective_optimization = "baseline";
 
   bool result = post_process_inputs();
@@ -305,6 +307,12 @@ Sys::Sys(
     std::cout << "Initiating AllGather logical topology!" << std::endl;
   logical_topologies["AllToAll"] = new GeneralComplexTopology(
       id, physical_dims, all_to_all_implementation_per_dimension);
+
+  //sepehr
+  if (id == 0)
+    std::cout << "Initiating Broadcast logical topology!" << std::endl;
+  logical_topologies["Broadcast"] = new GeneralComplexTopology(
+    id, physical_dims, broadcast_implementation_per_dimension);
 
   stream_counter = 0;
   if (id == 0) {
@@ -446,6 +454,17 @@ int Sys::break_dimension(int model_parallel_npu_group) {
       }
       replicate = (CollectiveImplementation*)(*it)->clone();
       all_to_all_implementation_per_dimension.insert(it, replicate);
+
+      // sepehr
+      it = broadcast_implementation_per_dimension.begin();
+      if (broadcast_implementation_per_dimension.size() > dimension_to_break) {
+        std::advance(it, dimension_to_break);
+      } else {
+        std::advance(it, broadcast_implementation_per_dimension.size());
+      }
+      replicate = (CollectiveImplementation*)(*it)->clone();
+      broadcast_implementation_per_dimension.insert(it, replicate);
+
       logical_topologies["AllReduce"] = new GeneralComplexTopology(
           id, logical_dims, all_reduce_implementation_per_dimension);
       logical_topologies["ReduceScatter"] = new GeneralComplexTopology(
@@ -454,6 +473,9 @@ int Sys::break_dimension(int model_parallel_npu_group) {
           id, logical_dims, all_gather_implementation_per_dimension);
       logical_topologies["AllToAll"] = new GeneralComplexTopology(
           id, logical_dims, all_to_all_implementation_per_dimension);
+      // sepehr
+      logical_topologies["Broadcast"] = new GeneralComplexTopology(
+          id, logical_dims, broadcast_implementation_per_dimension);
       this->logical_broken_dims = logical_dims;
       this->dim_to_break = dimension_to_break;
       
@@ -771,6 +793,10 @@ bool Sys::parse_var(std::string var, std::string value) {
   } else if (var == "all-gather-implementation:") {
     std::stringstream mval(value);
     mval >> inp_all_gather_implementation;
+  } else if (var == "broadcast-implementation:") {
+    // sepehr
+    std::stringstream mval(value);
+    mval >> inp_broadcast_implementation;
   } else if (var == "all-to-all-implementation:") {
     std::stringstream mval(value);
     mval >> inp_all_to_all_implementation;
@@ -863,6 +889,7 @@ bool Sys::post_process_inputs() {
 
   if (id == 0) {
     std::cout << "post_process_inputs called that adds implementation per dimenssion for different collectives:" << std::endl << 
+      "\t inp_broadcast_implementation --> " << inp_broadcast_implementation << std::endl <<
       "\t inp_all_reduce_implementation --> " << inp_all_reduce_implementation << std::endl <<
       "\t inp_reduce_scatter_implementation --> " << inp_reduce_scatter_implementation << std::endl <<
       "\t inp_all_gather_implementation --> " << inp_all_gather_implementation << std::endl <<
@@ -873,6 +900,14 @@ bool Sys::post_process_inputs() {
       "\t inp_model_shared_bus --> " << inp_model_shared_bus << std::endl;
   }
   
+  // sepehr
+  broadcast_implementation_per_dimension =
+      generate_collective_implementation_from_input(
+          inp_broadcast_implementation);
+  if (broadcast_implementation_per_dimension.size() == 0) {
+    sys_panic("unknown value for broadcast-implementation in sys input file");
+  }
+
   all_reduce_implementation_per_dimension =
       generate_collective_implementation_from_input(
           inp_all_reduce_implementation);
@@ -1086,6 +1121,35 @@ uint64_t Sys::determine_chunk_size(uint64_t size, ComType type) {
   uint64_t chunk_size = size / preferred_dataset_splits;
   return chunk_size;
 }
+
+// sepehr
+DataSet* Sys::generate_broadcast(
+    uint64_t size,
+    std::vector<bool> involved_dimensions,
+    SchedulingPolicy pref_scheduling,
+    int layer,
+    EventType event,
+    Callable* layer_ptr) {
+
+  if (id == 0)
+      std::cout << "generate_broadcast called:" << std::endl << 
+        "\t size: " << size << std::endl << 
+        "\t involved_dimensions.size: " << involved_dimensions.size() << std::endl <<
+        "\t layer: " << layer << std::endl <<
+        "\t event: " << static_cast<int>(event) << std::endl;
+  
+  return generate_collective(
+      size,
+      layer,
+      logical_topologies["Broadcast"],
+      broadcast_implementation_per_dimension,
+      involved_dimensions,
+      ComType::Broadcast,
+      pref_scheduling,
+      event,
+      layer_ptr);
+}
+
 DataSet* Sys::generate_all_reduce(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1219,9 +1283,43 @@ CollectivePhase Sys::generate_collective_phase(
 
         MockNcclLog* NcclLog = MockNcclLog::getInstance();
 
+        // sepehr
+        // Optional but recommended: fail fast for unsupported Broadcast impls.
+        if (collective_type == ComType::Broadcast &&
+            collective_implementation->type != CollectiveImplementationType::Ring &&
+            collective_implementation->type != CollectiveImplementationType::OneRing) {
+          Sys::sys_panic(
+              "Broadcast is currently implemented only for ring / oneRing");
+        }
+
         if (collective_implementation->type == CollectiveImplementationType::Ring ||
               collective_implementation->type ==
                   CollectiveImplementationType::OneRing) {
+
+            RingTopology* ring_topology = dynamic_cast<RingTopology*>(topology);
+            if (ring_topology == nullptr) {
+              Sys::sys_panic(
+                  "generate_collective_phase: Ring implementation requires RingTopology");
+            }
+
+            // sepehr
+            // NEW: Ring Broadcast dispatch
+            if (collective_type == ComType::Broadcast) {
+              return CollectivePhase(
+                  this,
+                  queue_id,
+                  new RingBroadcast(
+                      collective_type,
+                      id,
+                      layer_num,
+                      ring_topology,
+                      data_size,
+                      direction,
+                      injection_policy,
+                      boost_mode,
+                      /* root = */ 0));
+            }
+            
             CollectivePhase vn(
                 this,
                 queue_id,
@@ -1229,7 +1327,7 @@ CollectivePhase Sys::generate_collective_phase(
                     collective_type,
                     id,
                     layer_num,
-                    (RingTopology*)topology,
+                    ring_topology,
                     data_size,
                     direction,
                     injection_policy,

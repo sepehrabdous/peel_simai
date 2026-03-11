@@ -103,6 +103,9 @@ class Sys : public Callable {
       all_gather_implementation_per_dimension;
   std::vector<CollectiveImplementation*>
       all_to_all_implementation_per_dimension;
+
+  // sepehr
+  std::vector<CollectiveImplementation*> broadcast_implementation_per_dimension;
   CollectiveOptimization collectiveOptimization;
 
   std::chrono::high_resolution_clock::time_point start_sim_time;
@@ -169,6 +172,10 @@ class Sys : public Callable {
   std::string inp_reduce_scatter_implementation;
   std::string inp_all_gather_implementation;
   std::string inp_all_to_all_implementation;
+
+  //sepehr
+  std::string inp_broadcast_implementation;
+
   std::string inp_collective_optimization;
   float inp_L;
   float inp_o;
@@ -348,6 +355,16 @@ class Sys : public Callable {
       int layer,
       EventType event = EventType::NONE,
       Callable* layer_ptr = nullptr);
+  
+  // sepehr
+  DataSet* generate_broadcast(
+    uint64_t size,
+    std::vector<bool> involved_dimensions,
+    SchedulingPolicy pref_scheduling,
+    int layer,
+    EventType event = EventType::NONE,
+    Callable* layer_ptr = nullptr);
+
   DataSet* generate_collective(
       uint64_t size,
       int layer_num,
