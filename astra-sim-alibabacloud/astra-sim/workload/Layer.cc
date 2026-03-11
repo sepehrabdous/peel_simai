@@ -1226,6 +1226,41 @@ void Layer::issue_forward_pass_comm(
           << id << ",";
       print_involved_dimensions(fwd_pass_comm_involved_dimensions);
     }
+  }  else if (fwd_pass_comm_type == ComType::Broadcast) {
+    // sepehr
+    #ifdef PHY_MTP
+    fp = generator->generate_broadcast(
+        fwd_pass_comm_size,
+        fwd_pass_comm_involved_dimensions,
+        pref_scheduling,
+        layer_num,
+        EventType::Fwd_Comm_Finished,
+        this);
+    #else
+    fp = generator->generate_broadcast(
+        fwd_pass_comm_size,
+        fwd_pass_comm_involved_dimensions,
+        pref_scheduling,
+        layer_num);
+    #endif
+    if (!fp->active) {
+      if (generator->id == 0) {
+        std::cout
+            << "info: all dims disabled, no forward pass collective for layer: "
+            << id << std::endl;
+      }
+      collective_counter--;
+      delete fp;
+      if (barrier == CollectiveBarrier::Blocking) {
+        workload->call(EventType::General, NULL);
+      }
+      return;
+    }
+    if (generator->id == 0) {
+      std::cout << "info: broadcast forward pass collective issued for layer: "
+                << id << ",";
+      print_involved_dimensions(fwd_pass_comm_involved_dimensions);
+    }
   } else if (fwd_pass_comm_type == ComType::None) {
     collective_counter--;
     if (generator->id == 0) {
@@ -1405,6 +1440,40 @@ void Layer::issue_input_grad_comm(
       std::cout
           << "info: reduce-scatter input grad collective issued for layer: "
           << id << ",";
+      print_involved_dimensions(input_grad_comm_involved_dimensions);
+    }
+  } else if (input_grad_comm_type == ComType::Broadcast) {
+    #ifdef PHY_MTP
+    ig = generator->generate_broadcast(
+        input_grad_comm_size,
+        input_grad_comm_involved_dimensions,
+        pref_scheduling,
+        layer_num,
+        EventType::Input_Grad_Comm_Finished,
+        this);
+    #else
+    ig = generator->generate_broadcast(
+        input_grad_comm_size,
+        input_grad_comm_involved_dimensions,
+        pref_scheduling,
+        layer_num);
+    #endif
+    if (!ig->active) {
+      if (generator->id == 0) {
+        std::cout
+            << "info: all dims disabled, no input grad collective for layer: "
+            << id << std::endl;
+      }
+      collective_counter--;
+      delete ig;
+      if (barrier == CollectiveBarrier::Blocking) {
+        workload->call(EventType::General, NULL);
+      }
+      return;
+    }
+    if (generator->id == 0) {
+      std::cout << "info: broadcast input grad collective issued for layer: "
+                << id << ",";
       print_involved_dimensions(input_grad_comm_involved_dimensions);
     }
   } else if (input_grad_comm_type == ComType::None) {
