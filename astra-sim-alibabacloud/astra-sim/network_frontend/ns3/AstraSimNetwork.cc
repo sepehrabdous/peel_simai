@@ -296,43 +296,43 @@ int main(int argc, char *argv[]) {
   std::cout << "nodes_num (num_gpus + num_nv_switches): " << nodes_num << std::endl;
   std::cout << "gpu_num: " << gpu_num << std::endl;
 
-  std::vector<ASTRASimNetwork *> networks(nodes_num, nullptr);
-  std::vector<AstraSim::Sys *> systems(nodes_num, nullptr);
+  std::vector<ASTRASimNetwork *> networks(gpu_num, nullptr);
+  std::vector<AstraSim::Sys *> systems(gpu_num, nullptr);
 
   std::cout << "Initiating ASTRASimNetwork and AstraSim::Sys" << std::endl;
-  for (int j = 0; j < nodes_num; j++) {
+  for (int j = 0; j < gpu_num; j++) {
     networks[j] =
         new ASTRASimNetwork(j ,0);
     systems[j] = new AstraSim::Sys(
-        networks[j], 
-        nullptr,                  
-        j,                        
-        0,               
-        1,                        
-        {nodes_num},        
-        {1},          
-        "", 
-        user_param.workload, 
-        1, 
-        1,          
-        1,          
+        networks[j],
+        nullptr,
+        j,
+        0,
         1,
-        0,                 
-        RESULT_PATH, 
-        "test1",            
-        true,               
-        false,               
+        {gpu_num},
+        {1},
+        "",
+        user_param.workload,
+        1,
+        1,
+        1,
+        1,
+        0,
+        RESULT_PATH,
+        "test1",
+        true,
+        false,
         gpu_type,
         {gpu_num},
         NVswitchs,
         gpus_per_server
     );
     systems[j]->nvswitch_id = node2nvswitch[j];
-    systems[j]->num_gpus = nodes_num - nvswitch_num;
+    systems[j]->num_gpus = gpu_num;
   }
 
   std::cout << "\nFiring the workloads" << std::endl;
-  for (int i = 0; i < nodes_num; i++) {
+  for (int i = 0; i < gpu_num; i++) {
     systems[i]->workload->fire();
   }
 
