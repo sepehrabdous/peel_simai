@@ -1316,8 +1316,7 @@ CollectivePhase Sys::generate_collective_phase(
                       data_size,
                       direction,
                       injection_policy,
-                      boost_mode,
-                      /* root = */ 0));
+                      boost_mode));
             }
             
             CollectivePhase vn(

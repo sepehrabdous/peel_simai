@@ -19,7 +19,9 @@ RingBroadcast::RingBroadcast(
     : Algorithm(layer_num) {
   this->comType = type;
   this->id = id;
-  this->root = root;
+  // the input root is not used anymore for now (default is zero)!
+  // this->root = root;
+  this->root = id - ring_topology->index_in_ring * ring_topology->offset;
   this->logicalTopology = ring_topology;
   this->data_size = data_size;
   this->final_data_size = data_size;
@@ -39,7 +41,7 @@ RingBroadcast::RingBroadcast(
   this->send_from_npu = true;
 
   this->recv_posted = false;
-  this->recv_done = (id == root);
+  this->recv_done = (id == this->root);
   this->send_done = false;
 
   this->name = Name::Ring;
