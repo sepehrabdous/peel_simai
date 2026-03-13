@@ -240,6 +240,14 @@ bool RingBroadcast::ready() {
   chunks_sent++;
   send_done = (chunks_sent == num_chunks);
 
+  // IMPORTANT:
+  // For intermediate nodes, post the NEXT recv only after forwarding
+  // the current chunk. This matches the normal Ring progression much
+  // better than bulk-posting all recvs at StreamInit.
+  if (!is_root() && !is_last() && posted_data_recvs < num_chunks) {
+    post_data_recv();
+  }
+
   return true;
 }
 
@@ -294,10 +302,17 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
-    if (!is_last()) {
+    if (is_last()) {
+      // Last node never forwards, so it must repost its own next recv here.
+      if (chunks_received < num_chunks) {
+        post_data_recv();
+      } else {
+        notify_root_drain_complete();
+      }
+    } else {
+      // Intermediate node forwards the chunk; its next recv will be posted
+      // in ready() after that forward send is issued.
       stage_data_packet(false);
-    } else if (chunks_received == num_chunks) {
-      notify_root_drain_complete();
     }
 
     maybe_exit();
@@ -321,9 +336,8 @@ void RingBroadcast::run(EventType event, CallData* data) {
       }
       stage_data_packet(true);
     } else {
-      for (int i = 0; i < num_chunks; i++) {
-        post_data_recv();
-      }
+      // Seed with exactly one recv.
+      post_data_recv();
     }
 
     return;
