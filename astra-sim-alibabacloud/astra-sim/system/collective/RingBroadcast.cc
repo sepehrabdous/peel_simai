@@ -294,10 +294,6 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
-    if (posted_data_recvs < num_chunks) {
-      post_data_recv();
-    }
-
     if (!is_last()) {
       stage_data_packet(false);
     } else if (chunks_received == num_chunks) {
@@ -325,7 +321,9 @@ void RingBroadcast::run(EventType event, CallData* data) {
       }
       stage_data_packet(true);
     } else {
-      post_data_recv();
+      for (int i = 0; i < num_chunks; i++) {
+        post_data_recv();
+      }
     }
 
     return;
