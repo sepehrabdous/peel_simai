@@ -21,6 +21,9 @@
 #include "astra-sim/system/MyPacket.hh"
 #include "astra-sim/system/topology/RingTopology.hh"
 
+// // Number of pipeline chunks for ring broadcast; change this to tune pipelining.
+// #define AS_RING_BCAST_CHUNKS 8
+
 namespace AstraSim {
 
 class RingBroadcast : public Algorithm {
@@ -50,6 +53,12 @@ class RingBroadcast : public Algorithm {
   bool recv_posted;
   bool recv_done;
   bool send_done;
+
+  int num_chunks;
+  int chunks_sent;
+  int chunks_received;
+
+  uint64_t AS_RING_BCAST_CHUNKS = 1;
 
   RingBroadcast(
       ComType type,

@@ -25,7 +25,6 @@ RingBroadcast::RingBroadcast(
   this->logicalTopology = ring_topology;
   this->data_size = data_size;
   this->final_data_size = data_size;
-  this->msg_size = data_size;
   this->direction = direction;
 
   this->nodes_in_ring = ring_topology->get_nodes_in_ring();
@@ -43,6 +42,22 @@ RingBroadcast::RingBroadcast(
   this->recv_posted = false;
   this->recv_done = (id == this->root);
   this->send_done = false;
+
+  const char* env_chunks = std::getenv("AS_RING_BCAST_CHUNKS");
+  if (env_chunks != nullptr) {
+    unsigned long long tmp = std::strtoull(env_chunks, nullptr, 10);
+    if (tmp > 0) {
+      AS_RING_BCAST_CHUNKS = static_cast<uint64_t>(tmp);
+    }
+  }
+
+  if (id == 0)
+    std::cout << "AS_RING_BCAST_CHUNKS: " << AS_RING_BCAST_CHUNKS << std::endl;
+
+  this->num_chunks = AS_RING_BCAST_CHUNKS;
+  this->msg_size = data_size / num_chunks;
+  this->chunks_sent = 0;
+  this->chunks_received = 0;
 
   this->name = Name::Ring;
   this->enabled = true;
@@ -175,7 +190,8 @@ bool RingBroadcast::ready() {
 
   packets.pop_front();
   free_packets--;
-  send_done = true;
+  chunks_sent++;
+  send_done = (chunks_sent == num_chunks);
 
   return true;
 }
@@ -207,7 +223,14 @@ void RingBroadcast::run(EventType event, CallData* data) {
     ready();
     maybe_exit();
   } else if (event == EventType::PacketReceived) {
-    recv_done = true;
+    chunks_received++;
+    recv_done = (chunks_received == num_chunks);
+    recv_posted = false;
+
+    // Pipeline: post recv for the next chunk if more are expected.
+    if (chunks_received < num_chunks) {
+      post_recv();
+    }
 
     if (!is_last()) {
       stage_packet(false);
@@ -225,7 +248,10 @@ void RingBroadcast::run(EventType event, CallData* data) {
     }
 
     if (is_root()) {
-      stage_packet(true);
+      // Pipeline: stage all chunks up front; each General event will send one.
+      for (int i = 0; i < num_chunks; i++) {
+        stage_packet(true);
+      }
     } else {
       post_recv();
     }
