@@ -9,7 +9,7 @@
 namespace AstraSim {
 
 std::unordered_map<std::string, RingBroadcast*> RingBroadcast::root_waiters;
-std::mutex RingBroadcast::root_waiters_mutex;
+std::recursive_mutex RingBroadcast::root_waiters_mutex;
 
 RingBroadcast::RingBroadcast(
     ComType type,
@@ -25,8 +25,8 @@ RingBroadcast::RingBroadcast(
   this->comType = type;
   this->id = id;
 
-  // Keep your branch's current root behavior.
-  // If you later want arbitrary roots, change this to:
+  // Keep current behavior for choosing ring root.
+  // If later you want arbitrary roots from the caller, change this to:
   // this->root = root;
   this->root = id - ring_topology->index_in_ring * ring_topology->offset;
 
@@ -49,7 +49,7 @@ RingBroadcast::RingBroadcast(
   this->recv_done = (id == this->root);
   this->send_done = false;
   this->exited = false;
-  this->drain_complete = false;
+  this->drain_complete.store(false, std::memory_order_relaxed);
 
   const char* env_chunks = std::getenv("AS_RING_BCAST_CHUNKS");
   if (env_chunks != nullptr) {
@@ -69,8 +69,6 @@ RingBroadcast::RingBroadcast(
     this->num_chunks = 1;
   }
 
-  // Correctness-first:
-  // keep equal-size chunks only. If not divisible, fall back to 1 chunk.
   if (data_size == 0 || (data_size % this->num_chunks) != 0) {
     if (id == 0 && data_size != 0 && (data_size % this->num_chunks) != 0) {
       std::cout << "RingBroadcast: data_size " << data_size
@@ -111,24 +109,19 @@ bool RingBroadcast::is_last() const {
 }
 
 std::string RingBroadcast::completion_key() const {
-  return std::to_string(root) + "|" + std::to_string(layer_num) + "|" +
+  return std::to_string(root) + "|" +
+         std::to_string(layer_num) + "|" +
          std::to_string(stream->stream_num) + "|" +
          std::to_string(stream->current_queue_id) + "|" +
          std::to_string(static_cast<int>(direction));
 }
 
 void RingBroadcast::notify_root_drain_complete() {
-  RingBroadcast* root_alg = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(root_waiters_mutex);
-    auto it = root_waiters.find(completion_key());
-    if (it != root_waiters.end()) {
-      root_alg = it->second;
-    }
-  }
-
-  if (root_alg != nullptr) {
-    root_alg->drain_complete = true;
+  std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
+  auto it = root_waiters.find(completion_key());
+  if (it != root_waiters.end() && it->second != nullptr) {
+    RingBroadcast* root_alg = it->second;
+    root_alg->drain_complete.store(true, std::memory_order_release);
     root_alg->maybe_exit();
   }
 }
@@ -256,10 +249,7 @@ void RingBroadcast::maybe_exit() {
   }
 
   if (is_root()) {
-    // Root must wait until:
-    // 1) it has locally staged and sent all chunks, and
-    // 2) the last node has notified that the ring drained.
-    if (!drain_complete) {
+    if (!drain_complete.load(std::memory_order_acquire)) {
       return;
     }
     if (chunks_staged < num_chunks || chunks_sent < num_chunks) {
@@ -272,9 +262,6 @@ void RingBroadcast::maybe_exit() {
     return;
   }
 
-  // Non-root nodes:
-  // - must receive all chunks
-  // - if intermediate, must also forward all chunks
   if (chunks_received < num_chunks) {
     return;
   }
@@ -307,11 +294,13 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
+    if (posted_data_recvs < num_chunks) {
+      post_data_recv();
+    }
+
     if (!is_last()) {
       stage_data_packet(false);
     } else if (chunks_received == num_chunks) {
-      // Last node has fully received the broadcast.
-      // Notify the root directly in memory; do not inject a network ACK.
       notify_root_drain_complete();
     }
 
@@ -331,14 +320,12 @@ void RingBroadcast::run(EventType event, CallData* data) {
 
     if (is_root()) {
       {
-        std::lock_guard<std::mutex> lock(root_waiters_mutex);
+        std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
         root_waiters[completion_key()] = this;
       }
       stage_data_packet(true);
     } else {
-      for (int i = 0; i < num_chunks; i++) {
-        post_data_recv();
-      }
+      post_data_recv();
     }
 
     return;
@@ -352,7 +339,7 @@ void RingBroadcast::exit() {
   exited = true;
 
   if (is_root()) {
-    std::lock_guard<std::mutex> lock(root_waiters_mutex);
+    std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
     auto it = root_waiters.find(completion_key());
     if (it != root_waiters.end() && it->second == this) {
       root_waiters.erase(it);

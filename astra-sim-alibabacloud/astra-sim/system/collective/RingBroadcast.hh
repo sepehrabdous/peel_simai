@@ -5,6 +5,7 @@
 #include <math.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -53,7 +54,7 @@ class RingBroadcast : public Algorithm {
   bool recv_done;
   bool send_done;
   bool exited;
-  bool drain_complete;
+  std::atomic<bool> drain_complete;
 
   int num_chunks;
   int chunks_staged;
@@ -64,7 +65,7 @@ class RingBroadcast : public Algorithm {
   uint64_t AS_RING_BCAST_CHUNKS = 1;
 
   static std::unordered_map<std::string, RingBroadcast*> root_waiters;
-  static std::mutex root_waiters_mutex;
+  static std::recursive_mutex root_waiters_mutex;
 
   RingBroadcast(
       ComType type,
