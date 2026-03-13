@@ -126,29 +126,29 @@ void RingBroadcast::notify_root_drain_complete() {
   }
 }
 
-void RingBroadcast::post_data_recv() {
+void RingBroadcast::post_data_recv(int src, int vnet, int stream_num) {
   if (!enabled || is_root() || posted_data_recvs >= num_chunks) {
     return;
   }
 
   sim_request rcv_req;
-  rcv_req.vnet = this->stream->current_queue_id;
+  rcv_req.vnet = vnet;
   rcv_req.layerNum = layer_num;
 
   RecvPacketEventHadndlerData* ehd = new RecvPacketEventHadndlerData(
       stream,
       stream->owner->id,
       EventType::PacketReceived,
-      stream->current_queue_id,
-      stream->stream_num);
+      vnet,
+      stream_num);
 
   stream->owner->front_end_sim_recv(
       0,
       Sys::dummy_data,
       msg_size,
       UINT8,
-      current_sender,
-      stream->stream_num,
+      src,
+      stream_num,
       &rcv_req,
       &Sys::handleEvent,
       ehd);
@@ -161,7 +161,11 @@ void RingBroadcast::stage_data_packet(bool from_npu) {
     return;
   }
 
-  packets.push_back(MyPacket(stream->current_queue_id, id, current_receiver));
+  // IMPORTANT:
+  // Match upstream Ring semantics: packet carries the source we expect
+  // the NEXT recv from, and the destination we send to.
+  packets.push_back(
+      MyPacket(stream->current_queue_id, current_sender, current_receiver));
   packets.back().sender = nullptr;
   locked_packets.push_back(&packets.back());
 
@@ -234,19 +238,19 @@ bool RingBroadcast::ready() {
       &Sys::handleEvent,
       nullptr);
 
+  // IMPORTANT:
+  // Mirror Ring::ready(): after issuing the send, immediately post the
+  // next matching recv for intermediate nodes.
+  if (!is_root() && !is_last() && posted_data_recvs < num_chunks) {
+    post_data_recv(packet.preferred_src, packet.preferred_vnet,
+                   packet.stream_num);
+  }
+
   packets.pop_front();
   free_packets--;
 
   chunks_sent++;
   send_done = (chunks_sent == num_chunks);
-
-  // IMPORTANT:
-  // For intermediate nodes, post the NEXT recv only after forwarding
-  // the current chunk. This matches the normal Ring progression much
-  // better than bulk-posting all recvs at StreamInit.
-  if (!is_root() && !is_last() && posted_data_recvs < num_chunks) {
-    post_data_recv();
-  }
 
   return true;
 }
@@ -303,15 +307,16 @@ void RingBroadcast::run(EventType event, CallData* data) {
     recv_done = (chunks_received == num_chunks);
 
     if (is_last()) {
-      // Last node never forwards, so it must repost its own next recv here.
+      // Last node does not forward, so it must post its own next recv here.
       if (chunks_received < num_chunks) {
-        post_data_recv();
+        post_data_recv(current_sender, stream->current_queue_id,
+                       stream->stream_num);
       } else {
         notify_root_drain_complete();
       }
     } else {
-      // Intermediate node forwards the chunk; its next recv will be posted
-      // in ready() after that forward send is issued.
+      // Intermediate node forwards this chunk. Its next recv is posted in ready()
+      // after that forward send is actually issued.
       stage_data_packet(false);
     }
 
@@ -336,8 +341,9 @@ void RingBroadcast::run(EventType event, CallData* data) {
       }
       stage_data_packet(true);
     } else {
-      // Seed with exactly one recv.
-      post_data_recv();
+      // Seed the pipeline with exactly one recv.
+      post_data_recv(current_sender, stream->current_queue_id,
+                     stream->stream_num);
     }
 
     return;
