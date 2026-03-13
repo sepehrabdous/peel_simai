@@ -13,6 +13,7 @@
 #include <sstream>
 #include <tuple>
 #include <vector>
+
 #include "Algorithm.hh"
 #include "astra-sim/system/Common.hh"
 #include "astra-sim/system/MemBus.hh"
@@ -37,7 +38,11 @@ class RingBroadcast : public Algorithm {
   std::list<MyPacket> packets;
   std::list<MyPacket*> locked_packets;
 
+  // Parallel list: false = data packet, true = ack packet
+  std::list<bool> packet_is_ack;
+
   uint64_t msg_size;
+  uint64_t ack_size;
 
   long free_packets;
 
@@ -49,11 +54,17 @@ class RingBroadcast : public Algorithm {
   bool send_done;
   bool exited;
 
+  // ACK/drain state
+  bool waiting_for_ack;
+  bool ack_received;
+  bool ack_sent;
+  bool ack_recv_posted;
+
   int num_chunks;
-  int chunks_staged;    // how many chunks have been pushed into the local MA/NPU path
-  int chunks_sent;      // how many chunks have been sent on the network
-  int chunks_received;  // how many chunks have been received from the previous hop
-  int posted_recvs;     // how many recv requests have been posted
+  int chunks_staged;
+  int chunks_sent;
+  int chunks_received;
+  int posted_data_recvs;
 
   uint64_t AS_RING_BCAST_CHUNKS = 1;
 
@@ -73,8 +84,12 @@ class RingBroadcast : public Algorithm {
   bool is_root() const;
   bool is_last() const;
 
-  void post_recv();
-  void stage_packet(bool from_npu);
+  void post_data_recv();
+  void post_ack_recv();
+
+  void stage_data_packet(bool from_npu);
+  void stage_ack_packet(bool from_npu, int dest);
+
   void release_packets();
   bool ready();
   void maybe_exit();
