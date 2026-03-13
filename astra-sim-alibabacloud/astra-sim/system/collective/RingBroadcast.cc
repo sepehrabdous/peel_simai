@@ -8,6 +8,9 @@
 
 namespace AstraSim {
 
+std::unordered_map<std::string, RingBroadcast*> RingBroadcast::root_waiters;
+std::mutex RingBroadcast::root_waiters_mutex;
+
 RingBroadcast::RingBroadcast(
     ComType type,
     int id,
@@ -22,8 +25,8 @@ RingBroadcast::RingBroadcast(
   this->comType = type;
   this->id = id;
 
-  // Keep your current root behavior for now.
-  // If you later want arbitrary broadcast roots, change this to:
+  // Keep your branch's current root behavior.
+  // If you later want arbitrary roots, change this to:
   // this->root = root;
   this->root = id - ring_topology->index_in_ring * ring_topology->offset;
 
@@ -46,13 +49,7 @@ RingBroadcast::RingBroadcast(
   this->recv_done = (id == this->root);
   this->send_done = false;
   this->exited = false;
-
-  this->waiting_for_ack = false;
-  this->ack_received = false;
-  this->ack_sent = false;
-  this->ack_recv_posted = false;
-
-  this->ack_size = 1;
+  this->drain_complete = false;
 
   const char* env_chunks = std::getenv("AS_RING_BCAST_CHUNKS");
   if (env_chunks != nullptr) {
@@ -72,7 +69,8 @@ RingBroadcast::RingBroadcast(
     this->num_chunks = 1;
   }
 
-  // Keep equal-size chunks for now.
+  // Correctness-first:
+  // keep equal-size chunks only. If not divisible, fall back to 1 chunk.
   if (data_size == 0 || (data_size % this->num_chunks) != 0) {
     if (id == 0 && data_size != 0 && (data_size % this->num_chunks) != 0) {
       std::cout << "RingBroadcast: data_size " << data_size
@@ -112,6 +110,29 @@ bool RingBroadcast::is_last() const {
   return current_receiver == root;
 }
 
+std::string RingBroadcast::completion_key() const {
+  return std::to_string(root) + "|" + std::to_string(layer_num) + "|" +
+         std::to_string(stream->stream_num) + "|" +
+         std::to_string(stream->current_queue_id) + "|" +
+         std::to_string(static_cast<int>(direction));
+}
+
+void RingBroadcast::notify_root_drain_complete() {
+  RingBroadcast* root_alg = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(root_waiters_mutex);
+    auto it = root_waiters.find(completion_key());
+    if (it != root_waiters.end()) {
+      root_alg = it->second;
+    }
+  }
+
+  if (root_alg != nullptr) {
+    root_alg->drain_complete = true;
+    root_alg->maybe_exit();
+  }
+}
+
 void RingBroadcast::post_data_recv() {
   if (!enabled || is_root() || posted_data_recvs >= num_chunks) {
     return;
@@ -142,37 +163,6 @@ void RingBroadcast::post_data_recv() {
   posted_data_recvs++;
 }
 
-void RingBroadcast::post_ack_recv() {
-  if (!enabled || ack_recv_posted || is_last()) {
-    return;
-  }
-
-  sim_request rcv_req;
-  rcv_req.vnet = this->stream->current_queue_id;
-  rcv_req.layerNum = layer_num;
-
-  RecvPacketEventHadndlerData* ehd = new RecvPacketEventHadndlerData(
-      stream,
-      stream->owner->id,
-      EventType::PacketReceived,
-      stream->current_queue_id,
-      stream->stream_num);
-
-  // ACK travels backward, so each node receives it from current_receiver.
-  stream->owner->front_end_sim_recv(
-      0,
-      Sys::dummy_data,
-      ack_size,
-      UINT8,
-      current_receiver,
-      stream->stream_num,
-      &rcv_req,
-      &Sys::handleEvent,
-      ehd);
-
-  ack_recv_posted = true;
-}
-
 void RingBroadcast::stage_data_packet(bool from_npu) {
   if (!enabled || chunks_staged >= num_chunks) {
     return;
@@ -181,7 +171,6 @@ void RingBroadcast::stage_data_packet(bool from_npu) {
   packets.push_back(MyPacket(stream->current_queue_id, id, current_receiver));
   packets.back().sender = nullptr;
   locked_packets.push_back(&packets.back());
-  packet_is_ack.push_back(false);
 
   processed = false;
   send_back = false;
@@ -191,31 +180,9 @@ void RingBroadcast::stage_data_packet(bool from_npu) {
   chunks_staged++;
 }
 
-void RingBroadcast::stage_ack_packet(bool from_npu, int dest) {
-  if (!enabled || ack_sent) {
-    return;
-  }
-
-  packets.push_back(MyPacket(stream->current_queue_id, id, dest));
-  packets.back().sender = nullptr;
-  locked_packets.push_back(&packets.back());
-  packet_is_ack.push_back(true);
-
-  processed = false;
-  send_back = false;
-  send_from_npu = from_npu;
-
-  release_packets();
-}
-
 void RingBroadcast::release_packets() {
   for (auto packet : locked_packets) {
     packet->set_notifier(this);
-  }
-
-  uint64_t bundle_size = msg_size;
-  if (!packet_is_ack.empty() && packet_is_ack.back()) {
-    bundle_size = ack_size;
   }
 
   if (send_from_npu == true) {
@@ -225,7 +192,7 @@ void RingBroadcast::release_packets() {
          locked_packets,
          processed,
          send_back,
-         bundle_size,
+         msg_size,
          transmition))
         ->send_to_MA();
   } else {
@@ -235,7 +202,7 @@ void RingBroadcast::release_packets() {
          locked_packets,
          processed,
          send_back,
-         bundle_size,
+         msg_size,
          transmition))
         ->send_to_NPU();
   }
@@ -254,8 +221,6 @@ bool RingBroadcast::ready() {
   }
 
   MyPacket packet = packets.front();
-  bool is_ack_pkt = packet_is_ack.front();
-  uint64_t send_size = is_ack_pkt ? ack_size : msg_size;
 
   sim_request snd_req;
   snd_req.srcRank = id;
@@ -268,7 +233,7 @@ bool RingBroadcast::ready() {
   stream->owner->front_end_sim_send(
       0,
       Sys::dummy_data,
-      send_size,
+      msg_size,
       UINT8,
       packet.preferred_dest,
       stream->stream_num,
@@ -277,15 +242,10 @@ bool RingBroadcast::ready() {
       nullptr);
 
   packets.pop_front();
-  packet_is_ack.pop_front();
   free_packets--;
 
-  if (is_ack_pkt) {
-    ack_sent = true;
-  } else {
-    chunks_sent++;
-    send_done = (chunks_sent == num_chunks);
-  }
+  chunks_sent++;
+  send_done = (chunks_sent == num_chunks);
 
   return true;
 }
@@ -296,8 +256,13 @@ void RingBroadcast::maybe_exit() {
   }
 
   if (is_root()) {
-    // Root must wait for the reverse ACK.
-    if (!ack_received) {
+    // Root must wait until:
+    // 1) it has locally staged and sent all chunks, and
+    // 2) the last node has notified that the ring drained.
+    if (!drain_complete) {
+      return;
+    }
+    if (chunks_staged < num_chunks || chunks_sent < num_chunks) {
       return;
     }
     if (!packets.empty() || !locked_packets.empty()) {
@@ -307,22 +272,15 @@ void RingBroadcast::maybe_exit() {
     return;
   }
 
+  // Non-root nodes:
+  // - must receive all chunks
+  // - if intermediate, must also forward all chunks
   if (chunks_received < num_chunks) {
     return;
   }
 
   if (!is_last() && chunks_sent < num_chunks) {
     return;
-  }
-
-  if (is_last()) {
-    if (!ack_sent) {
-      return;
-    }
-  } else {
-    if (!ack_received || !ack_sent) {
-      return;
-    }
   }
 
   if (!packets.empty() || !locked_packets.empty()) {
@@ -337,7 +295,6 @@ void RingBroadcast::run(EventType event, CallData* data) {
     free_packets += 1;
     ready();
 
-    // Root injects one new data chunk whenever local path frees up.
     if (is_root() && chunks_staged < num_chunks) {
       stage_data_packet(true);
     }
@@ -347,38 +304,15 @@ void RingBroadcast::run(EventType event, CallData* data) {
   }
 
   if (event == EventType::PacketReceived) {
-    // If this node is currently waiting for the reverse ACK,
-    // this receive is the ACK, not a data chunk.
-    if (waiting_for_ack) {
-      ack_received = true;
-      waiting_for_ack = false;
-      ack_recv_posted = false;
-
-      if (!is_root()) {
-        // Forward ACK one hop backward toward the root.
-        stage_ack_packet(false, current_sender);
-      }
-
-      maybe_exit();
-      return;
-    }
-
-    // Otherwise this is a forward data chunk.
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
     if (!is_last()) {
       stage_data_packet(false);
-    }
-
-    if (chunks_received == num_chunks) {
-      if (is_last()) {
-        // Last node originates the drain ACK.
-        stage_ack_packet(true, current_sender);
-      } else {
-        waiting_for_ack = true;
-        post_ack_recv();
-      }
+    } else if (chunks_received == num_chunks) {
+      // Last node has fully received the broadcast.
+      // Notify the root directly in memory; do not inject a network ACK.
+      notify_root_drain_complete();
     }
 
     maybe_exit();
@@ -396,11 +330,11 @@ void RingBroadcast::run(EventType event, CallData* data) {
     }
 
     if (is_root()) {
-      // Root starts the data pipeline and also waits for final ACK
-      // from its forward neighbor.
+      {
+        std::lock_guard<std::mutex> lock(root_waiters_mutex);
+        root_waiters[completion_key()] = this;
+      }
       stage_data_packet(true);
-      waiting_for_ack = true;
-      post_ack_recv();
     } else {
       for (int i = 0; i < num_chunks; i++) {
         post_data_recv();
@@ -417,17 +351,22 @@ void RingBroadcast::exit() {
   }
   exited = true;
 
+  if (is_root()) {
+    std::lock_guard<std::mutex> lock(root_waiters_mutex);
+    auto it = root_waiters.find(completion_key());
+    if (it != root_waiters.end() && it->second == this) {
+      root_waiters.erase(it);
+    }
+  }
+
   if (!packets.empty()) {
     packets.clear();
   }
   if (!locked_packets.empty()) {
     locked_packets.clear();
   }
-  if (!packet_is_ack.empty()) {
-    packet_is_ack.clear();
-  }
 
   stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
 }
 
-} // namespace AstraSim
+}  // namespace AstraSim

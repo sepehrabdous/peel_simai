@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <math.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -10,8 +11,11 @@
 #include <fstream>
 #include <list>
 #include <map>
+#include <mutex>
 #include <sstream>
+#include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "Algorithm.hh"
@@ -38,11 +42,7 @@ class RingBroadcast : public Algorithm {
   std::list<MyPacket> packets;
   std::list<MyPacket*> locked_packets;
 
-  // Parallel list: false = data packet, true = ack packet
-  std::list<bool> packet_is_ack;
-
   uint64_t msg_size;
-  uint64_t ack_size;
 
   long free_packets;
 
@@ -53,12 +53,7 @@ class RingBroadcast : public Algorithm {
   bool recv_done;
   bool send_done;
   bool exited;
-
-  // ACK/drain state
-  bool waiting_for_ack;
-  bool ack_received;
-  bool ack_sent;
-  bool ack_recv_posted;
+  bool drain_complete;
 
   int num_chunks;
   int chunks_staged;
@@ -67,6 +62,9 @@ class RingBroadcast : public Algorithm {
   int posted_data_recvs;
 
   uint64_t AS_RING_BCAST_CHUNKS = 1;
+
+  static std::unordered_map<std::string, RingBroadcast*> root_waiters;
+  static std::mutex root_waiters_mutex;
 
   RingBroadcast(
       ComType type,
@@ -84,18 +82,17 @@ class RingBroadcast : public Algorithm {
   bool is_root() const;
   bool is_last() const;
 
+  std::string completion_key() const;
+  void notify_root_drain_complete();
+
   void post_data_recv();
-  void post_ack_recv();
-
   void stage_data_packet(bool from_npu);
-  void stage_ack_packet(bool from_npu, int dest);
-
   void release_packets();
   bool ready();
   void maybe_exit();
   void exit();
 };
 
-} // namespace AstraSim
+}  // namespace AstraSim
 
 #endif
