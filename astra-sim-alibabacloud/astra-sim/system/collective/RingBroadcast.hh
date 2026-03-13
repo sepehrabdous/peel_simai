@@ -1,9 +1,20 @@
+// sepehr
+
 #ifndef __RING_BROADCAST_HH__
 #define __RING_BROADCAST_HH__
 
+#include <assert.h>
+#include <math.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <ctime>
+#include <fstream>
 #include <list>
-
+#include <map>
+#include <sstream>
+#include <tuple>
+#include <vector>
 #include "Algorithm.hh"
 #include "astra-sim/system/Common.hh"
 #include "astra-sim/system/MemBus.hh"
@@ -27,23 +38,15 @@ class RingBroadcast : public Algorithm {
 
   std::list<MyPacket> packets;
   std::list<MyPacket*> locked_packets;
-  std::list<uint64_t> packet_sizes;
 
-  // Total broadcast size in bytes
   uint64_t msg_size;
-
-  // Chunking state
-  uint64_t requested_chunks;
-  uint64_t total_chunks;
-  uint64_t nominal_chunk_size;
-  uint64_t received_chunks;
-  uint64_t sent_chunks;
 
   long free_packets;
 
   bool processed;
   bool send_back;
   bool send_from_npu;
+
   bool recv_posted;
   bool recv_done;
   bool send_done;
@@ -64,18 +67,14 @@ class RingBroadcast : public Algorithm {
   bool is_root() const;
   bool is_last() const;
 
-  uint64_t chunk_size(uint64_t chunk_idx) const;
-  bool all_chunks_received() const;
-  bool all_chunks_sent() const;
-
   void post_recv();
-  void stage_packet(bool from_npu, uint64_t chunk_bytes);
-  void release_packets(uint64_t chunk_bytes);
+  void stage_packet(bool from_npu);
+  void release_packets();
   bool ready();
   void maybe_exit();
   void exit();
 };
 
-}  // namespace AstraSim
+} // namespace AstraSim
 
 #endif
