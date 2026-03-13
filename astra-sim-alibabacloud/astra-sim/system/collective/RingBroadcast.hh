@@ -86,7 +86,7 @@ class RingBroadcast : public Algorithm {
   std::string completion_key() const;
   void notify_root_drain_complete();
 
-  void post_data_recv(int src, int vnet, int stream_num);
+  void post_data_recv(int src, int vnet);
   void stage_data_packet(bool from_npu);
   void release_packets();
   bool ready();
