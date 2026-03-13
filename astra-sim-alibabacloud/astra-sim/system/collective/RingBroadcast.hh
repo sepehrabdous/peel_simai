@@ -1,5 +1,3 @@
-// sepehr
-
 #ifndef __RING_BROADCAST_HH__
 #define __RING_BROADCAST_HH__
 
@@ -20,9 +18,6 @@
 #include "astra-sim/system/MemBus.hh"
 #include "astra-sim/system/MyPacket.hh"
 #include "astra-sim/system/topology/RingTopology.hh"
-
-// // Number of pipeline chunks for ring broadcast; change this to tune pipelining.
-// #define AS_RING_BCAST_CHUNKS 8
 
 namespace AstraSim {
 
@@ -50,13 +45,15 @@ class RingBroadcast : public Algorithm {
   bool send_back;
   bool send_from_npu;
 
-  bool recv_posted;
   bool recv_done;
   bool send_done;
+  bool exited;
 
   int num_chunks;
-  int chunks_sent;
-  int chunks_received;
+  int chunks_staged;    // how many chunks have been pushed into the local MA/NPU path
+  int chunks_sent;      // how many chunks have been sent on the network
+  int chunks_received;  // how many chunks have been received from the previous hop
+  int posted_recvs;     // how many recv requests have been posted
 
   uint64_t AS_RING_BCAST_CHUNKS = 1;
 

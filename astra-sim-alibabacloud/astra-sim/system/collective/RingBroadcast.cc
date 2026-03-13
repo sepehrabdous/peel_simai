@@ -1,6 +1,8 @@
-// sepehr
-
 #include "RingBroadcast.hh"
+
+#include <cstdlib>
+#include <iostream>
+
 #include "astra-sim/system/PacketBundle.hh"
 #include "astra-sim/system/RecvPacketEventHadndlerData.hh"
 
@@ -19,9 +21,12 @@ RingBroadcast::RingBroadcast(
     : Algorithm(layer_num) {
   this->comType = type;
   this->id = id;
-  // the input root is not used anymore for now (default is zero)!
+
+  // Keep your current behavior for now.
+  // If you later want arbitrary broadcast roots, change this to:
   // this->root = root;
   this->root = id - ring_topology->index_in_ring * ring_topology->offset;
+
   this->logicalTopology = ring_topology;
   this->data_size = data_size;
   this->final_data_size = data_size;
@@ -32,16 +37,15 @@ RingBroadcast::RingBroadcast(
   this->current_sender = ring_topology->get_sender_node(id, direction);
 
   this->injection_policy = injection_policy;
-
   this->free_packets = 0;
 
   this->processed = false;
   this->send_back = false;
   this->send_from_npu = true;
 
-  this->recv_posted = false;
   this->recv_done = (id == this->root);
   this->send_done = false;
+  this->exited = false;
 
   const char* env_chunks = std::getenv("AS_RING_BCAST_CHUNKS");
   if (env_chunks != nullptr) {
@@ -51,13 +55,36 @@ RingBroadcast::RingBroadcast(
     }
   }
 
-  if (id == 0)
-    std::cout << "AS_RING_BCAST_CHUNKS: " << AS_RING_BCAST_CHUNKS << std::endl;
+  if (id == 0) {
+    std::cout << "AS_RING_BCAST_CHUNKS: " << AS_RING_BCAST_CHUNKS
+              << std::endl;
+  }
 
-  this->num_chunks = AS_RING_BCAST_CHUNKS;
-  this->msg_size = data_size / num_chunks;
+  this->num_chunks = static_cast<int>(AS_RING_BCAST_CHUNKS);
+  if (this->num_chunks <= 0) {
+    this->num_chunks = 1;
+  }
+
+  // This implementation assumes equal-size chunks.
+  // Do NOT silently lose bytes.
+  if (data_size == 0 || (data_size % this->num_chunks) != 0) {
+    if (id == 0 && data_size != 0 && (data_size % this->num_chunks) != 0) {
+      std::cout << "RingBroadcast: data_size " << data_size
+                << " is not divisible by AS_RING_BCAST_CHUNKS="
+                << this->num_chunks
+                << "; falling back to 1 chunk for correctness."
+                << std::endl;
+    }
+    this->num_chunks = 1;
+  }
+
+  this->msg_size =
+      (this->num_chunks == 0) ? data_size : data_size / this->num_chunks;
+
+  this->chunks_staged = 0;
   this->chunks_sent = 0;
   this->chunks_received = 0;
+  this->posted_recvs = 0;
 
   this->name = Name::Ring;
   this->enabled = true;
@@ -81,7 +108,7 @@ bool RingBroadcast::is_last() const {
 }
 
 void RingBroadcast::post_recv() {
-  if (!enabled || recv_posted || is_root()) {
+  if (!enabled || is_root() || posted_recvs >= num_chunks) {
     return;
   }
 
@@ -107,16 +134,15 @@ void RingBroadcast::post_recv() {
       &Sys::handleEvent,
       ehd);
 
-  recv_posted = true;
+  posted_recvs++;
 }
 
 void RingBroadcast::stage_packet(bool from_npu) {
-  if (!enabled || send_done) {
+  if (!enabled || chunks_staged >= num_chunks) {
     return;
   }
 
-  packets.push_back(
-      MyPacket(stream->current_queue_id, id, current_receiver));
+  packets.push_back(MyPacket(stream->current_queue_id, id, current_receiver));
   packets.back().sender = nullptr;
   locked_packets.push_back(&packets.back());
 
@@ -125,6 +151,7 @@ void RingBroadcast::stage_packet(bool from_npu) {
   send_from_npu = from_npu;
 
   release_packets();
+  chunks_staged++;
 }
 
 void RingBroadcast::release_packets() {
@@ -163,7 +190,8 @@ bool RingBroadcast::ready() {
     stream->changeState(StreamState::Executing);
   }
 
-  if (!enabled || packets.size() == 0 || send_done || free_packets == 0) {
+  if (!enabled || packets.empty() || free_packets == 0 ||
+      chunks_sent >= num_chunks) {
     return false;
   }
 
@@ -197,46 +225,59 @@ bool RingBroadcast::ready() {
 }
 
 void RingBroadcast::maybe_exit() {
-  if (!enabled) {
+  if (!enabled || exited) {
     return;
   }
 
+  // Root is done only when it has staged and sent every chunk.
   if (is_root()) {
-    if (send_done) {
+    if (chunks_staged == num_chunks &&
+        chunks_sent == num_chunks &&
+        packets.empty() &&
+        locked_packets.empty()) {
       exit();
     }
     return;
   }
 
-  if (!recv_done) {
+  // Every non-root must first receive all chunks.
+  if (chunks_received < num_chunks) {
     return;
   }
 
-  if (is_last() || send_done) {
-    exit();
+  // Intermediate nodes must also forward all received chunks.
+  if (!is_last() && chunks_sent < num_chunks) {
+    return;
   }
+
+  if (!packets.empty() || !locked_packets.empty()) {
+    return;
+  }
+
+  exit();
 }
 
 void RingBroadcast::run(EventType event, CallData* data) {
   if (event == EventType::General) {
     free_packets += 1;
     ready();
+
+    // Correctness-first pipelining:
+    // keep only one local chunk staged at a time.
+    if (is_root() && chunks_staged < num_chunks) {
+      stage_packet(true);
+    }
+
     maybe_exit();
   } else if (event == EventType::PacketReceived) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
-    recv_posted = false;
-
-    // Pipeline: post recv for the next chunk if more are expected.
-    if (chunks_received < num_chunks) {
-      post_recv();
-    }
 
     if (!is_last()) {
       stage_packet(false);
-    } else {
-      maybe_exit();
     }
+
+    maybe_exit();
   } else if (event == EventType::StreamInit) {
     if (!enabled) {
       return;
@@ -248,25 +289,30 @@ void RingBroadcast::run(EventType event, CallData* data) {
     }
 
     if (is_root()) {
-      // Pipeline: stage all chunks up front; each General event will send one.
-      for (int i = 0; i < num_chunks; i++) {
-        stage_packet(true);
-      }
+      stage_packet(true);
     } else {
-      post_recv();
+      // Pre-post all receives so the upstream sender never outruns us.
+      for (int i = 0; i < num_chunks; i++) {
+        post_recv();
+      }
     }
   }
 }
 
 void RingBroadcast::exit() {
-  if (packets.size() != 0) {
+  if (exited) {
+    return;
+  }
+  exited = true;
+
+  if (!packets.empty()) {
     packets.clear();
   }
-  if (locked_packets.size() != 0) {
+  if (!locked_packets.empty()) {
     locked_packets.clear();
   }
+
   stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
-  return;
 }
 
 } // namespace AstraSim
