@@ -104,6 +104,8 @@ RingBroadcast::RingBroadcast(
   } else {
     transmition = MemBus::Transmition::Usual;
   }
+
+  this->local_stage_busy = false;
 }
 
 bool RingBroadcast::is_root() const {
@@ -178,14 +180,28 @@ void RingBroadcast::stage_data_packet(bool from_npu) {
   packets.back().sender = nullptr;
   packets.back().stream_num = stream->stream_num;
 
-  locked_packets.push_back(&packets.back());
+  pending_stage_queue.push_back({&packets.back(), from_npu});
+  chunks_staged++;
+
+  kick_local_stage();
+}
+
+void RingBroadcast::kick_local_stage() {
+  if (!enabled || local_stage_busy || pending_stage_queue.empty()) {
+    return;
+  }
+
+  PendingStage next = pending_stage_queue.front();
+  pending_stage_queue.pop_front();
+
+  locked_packets.push_back(next.packet);
 
   processed = false;
   send_back = false;
-  send_from_npu = from_npu;
+  send_from_npu = next.from_npu;
 
+  local_stage_busy = true;
   release_packets();
-  chunks_staged++;
 }
 
 void RingBroadcast::release_packets() {
@@ -429,8 +445,11 @@ void RingBroadcast::cleanup_credit_state() {
 
 void RingBroadcast::run(EventType event, CallData* data) {
   if (event == EventType::General) {
+    local_stage_busy = false;
     free_packets += 1;
+
     try_progress_send();
+    kick_local_stage();
     return;
   }
 
@@ -519,6 +538,8 @@ void RingBroadcast::exit() {
   }
 
   stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
+
+  pending_stage_queue.clear();
 }
 
 }  // namespace AstraSim

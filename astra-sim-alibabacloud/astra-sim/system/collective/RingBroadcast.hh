@@ -121,6 +121,16 @@ class RingBroadcast : public Algorithm {
   void on_credit_available();
 
   void cleanup_credit_state();
+
+    struct PendingStage {
+    MyPacket* packet;
+    bool from_npu;
+    };
+
+    std::deque<PendingStage> pending_stage_queue;
+    bool local_stage_busy;
+
+    void kick_local_stage();
 };
 
 }  // namespace AstraSim
