@@ -17,6 +17,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include <deque>
 
 #include "Algorithm.hh"
 #include "astra-sim/system/Common.hh"

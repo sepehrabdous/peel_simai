@@ -457,16 +457,15 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
-    // As soon as this node fully receives chunk k,
-    // it should be ready to receive chunk k+1.
+    // First, forward the chunk we just finished receiving.
+    if (!is_last()) {
+      stage_data_packet(false);
+    }
+
+    // Only after that, arm the next receive and grant upstream credit.
     if (!is_root() && chunks_received < num_chunks) {
       post_data_recv();
       grant_incoming_credit();
-    }
-
-    // Then forward the chunk that was just received.
-    if (!is_last()) {
-      stage_data_packet(false);
     }
 
     maybe_exit();
