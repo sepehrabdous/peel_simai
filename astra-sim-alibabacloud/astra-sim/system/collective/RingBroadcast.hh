@@ -74,6 +74,15 @@ class RingBroadcast : public Algorithm {
   static std::unordered_map<std::string, RootCompletionState> root_waiters;
   static std::recursive_mutex root_waiters_mutex;
 
+  // Per-hop credit state.
+  static std::unordered_map<std::string, int> hop_credits;
+  static std::recursive_mutex hop_credits_mutex;
+
+  // Edge sender registry, so a receiver can wake its predecessor
+  // when it grants new credit on that edge.
+  static std::unordered_map<std::string, RingBroadcast*> edge_senders;
+  static std::recursive_mutex edge_senders_mutex;
+
   RingBroadcast(
       ComType type,
       int id,
@@ -97,8 +106,21 @@ class RingBroadcast : public Algorithm {
   void stage_data_packet(bool from_npu);
   void release_packets();
   bool ready();
+  bool try_progress_send();
   void maybe_exit();
   void exit();
+
+  std::string incoming_edge_key() const;
+  std::string outgoing_edge_key() const;
+
+  void grant_incoming_credit();
+  bool consume_outgoing_credit();
+
+  void register_as_edge_sender();
+  void unregister_as_edge_sender();
+  void on_credit_available();
+
+  void cleanup_credit_state();
 };
 
 }  // namespace AstraSim

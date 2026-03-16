@@ -12,6 +12,12 @@ std::unordered_map<std::string, RingBroadcast::RootCompletionState>
     RingBroadcast::root_waiters;
 std::recursive_mutex RingBroadcast::root_waiters_mutex;
 
+std::unordered_map<std::string, int> RingBroadcast::hop_credits;
+std::recursive_mutex RingBroadcast::hop_credits_mutex;
+
+std::unordered_map<std::string, RingBroadcast*> RingBroadcast::edge_senders;
+std::recursive_mutex RingBroadcast::edge_senders_mutex;
+
 RingBroadcast::RingBroadcast(
     ComType type,
     int id,
@@ -26,7 +32,7 @@ RingBroadcast::RingBroadcast(
   this->comType = type;
   this->id = id;
 
-  // Keep your current ring-root behavior.
+  // Keeping your current ring-root behavior.
   // If later you want arbitrary roots, change this to:
   // this->root = root;
   this->root = id - ring_topology->index_in_ring * ring_topology->offset;
@@ -167,7 +173,6 @@ void RingBroadcast::stage_data_packet(bool from_npu) {
     return;
   }
 
-  // Match Ring-style packet metadata.
   packets.push_back(
       MyPacket(stream->current_queue_id, current_sender, current_receiver));
   packets.back().sender = nullptr;
@@ -213,6 +218,22 @@ void RingBroadcast::release_packets() {
   locked_packets.clear();
 }
 
+bool RingBroadcast::consume_outgoing_credit() {
+  if (is_last()) {
+    return true;
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(hop_credits_mutex);
+  auto key = outgoing_edge_key();
+  auto it = hop_credits.find(key);
+  if (it == hop_credits.end() || it->second == 0) {
+    return false;
+  }
+
+  it->second--;
+  return true;
+}
+
 bool RingBroadcast::ready() {
   if (stream->state == StreamState::Created ||
       stream->state == StreamState::Ready) {
@@ -220,6 +241,11 @@ bool RingBroadcast::ready() {
   }
 
   if (!enabled || packets.empty() || free_packets == 0) {
+    return false;
+  }
+
+  // Enforce depth-1 per outgoing link.
+  if (!consume_outgoing_credit()) {
     return false;
   }
 
@@ -244,18 +270,25 @@ bool RingBroadcast::ready() {
       &Sys::handleEvent,
       nullptr);
 
-  // Intermediate nodes self-clock the next recv after forwarding.
-  if (!is_root() && !is_last() && posted_data_recvs < num_chunks) {
-    post_data_recv();
-  }
-
   packets.pop_front();
   free_packets--;
-
   chunks_sent++;
   send_done = (chunks_sent == num_chunks);
 
   return true;
+}
+
+bool RingBroadcast::try_progress_send() {
+  bool sent = ready();
+
+  // Root is allowed to stage the next chunk only after it actually
+  // sent the current queued chunk.
+  if (sent && is_root() && chunks_staged < num_chunks) {
+    stage_data_packet(true);
+  }
+
+  maybe_exit();
+  return sent;
 }
 
 void RingBroadcast::maybe_exit() {
@@ -307,16 +340,97 @@ void RingBroadcast::maybe_exit() {
   exit();
 }
 
+std::string RingBroadcast::incoming_edge_key() const {
+  return std::to_string(current_sender) + "->" +
+         std::to_string(id) + "|" +
+         std::to_string(layer_num) + "|" +
+         std::to_string(stream->stream_num) + "|" +
+         std::to_string(stream->current_queue_id) + "|" +
+         std::to_string(static_cast<int>(direction));
+}
+
+std::string RingBroadcast::outgoing_edge_key() const {
+  return std::to_string(id) + "->" +
+         std::to_string(current_receiver) + "|" +
+         std::to_string(layer_num) + "|" +
+         std::to_string(stream->stream_num) + "|" +
+         std::to_string(stream->current_queue_id) + "|" +
+         std::to_string(static_cast<int>(direction));
+}
+
+void RingBroadcast::register_as_edge_sender() {
+  if (!enabled || is_last()) {
+    return;
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(edge_senders_mutex);
+  edge_senders[outgoing_edge_key()] = this;
+}
+
+void RingBroadcast::unregister_as_edge_sender() {
+  if (is_last()) {
+    return;
+  }
+
+  std::lock_guard<std::recursive_mutex> lock(edge_senders_mutex);
+  auto it = edge_senders.find(outgoing_edge_key());
+  if (it != edge_senders.end() && it->second == this) {
+    edge_senders.erase(it);
+  }
+}
+
+void RingBroadcast::on_credit_available() {
+  if (!enabled || exited) {
+    return;
+  }
+  try_progress_send();
+}
+
+void RingBroadcast::grant_incoming_credit() {
+  if (is_root()) {
+    return;
+  }
+
+  RingBroadcast* sender = nullptr;
+  std::string key = incoming_edge_key();
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(hop_credits_mutex);
+    hop_credits[key]++;
+  }
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(edge_senders_mutex);
+    auto it = edge_senders.find(key);
+    if (it != edge_senders.end()) {
+      sender = it->second;
+    }
+  }
+
+  // Wake predecessor after granting credit.
+  if (sender != nullptr) {
+    sender->on_credit_available();
+  }
+}
+
+void RingBroadcast::cleanup_credit_state() {
+  {
+    std::lock_guard<std::recursive_mutex> lock(hop_credits_mutex);
+    if (!is_root()) {
+      hop_credits.erase(incoming_edge_key());
+    }
+    if (!is_last()) {
+      hop_credits.erase(outgoing_edge_key());
+    }
+  }
+
+  unregister_as_edge_sender();
+}
+
 void RingBroadcast::run(EventType event, CallData* data) {
   if (event == EventType::General) {
     free_packets += 1;
-    ready();
-
-    if (is_root() && chunks_staged < num_chunks) {
-      stage_data_packet(true);
-    }
-
-    maybe_exit();
+    try_progress_send();
     return;
   }
 
@@ -324,11 +438,15 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
-    if (is_last()) {
-      if (chunks_received < num_chunks) {
-        post_data_recv();
-      }
-    } else {
+    // As soon as this node fully receives chunk k,
+    // it should be ready to receive chunk k+1.
+    if (!is_root() && chunks_received < num_chunks) {
+      post_data_recv();
+      grant_incoming_credit();
+    }
+
+    // Then forward the chunk that was just received.
+    if (!is_last()) {
       stage_data_packet(false);
     }
 
@@ -346,6 +464,10 @@ void RingBroadcast::run(EventType event, CallData* data) {
       return;
     }
 
+    if (!is_last()) {
+      register_as_edge_sender();
+    }
+
     if (is_root()) {
       {
         std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
@@ -355,9 +477,15 @@ void RingBroadcast::run(EventType event, CallData* data) {
         state.expected_nonroots = nodes_in_ring - 1;
         root_waiters[completion_key()] = state;
       }
+
+      // Start with exactly one chunk staged.
       stage_data_packet(true);
     } else {
+      // Initial receive post for chunk 0.
       post_data_recv();
+
+      // Initial credit to predecessor so it may send chunk 0 on this edge.
+      grant_incoming_credit();
     }
 
     return;
@@ -377,6 +505,8 @@ void RingBroadcast::exit() {
   if (locked_packets.size() != 0) {
     locked_packets.clear();
   }
+
+  cleanup_credit_state();
 
   if (is_root()) {
     std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
