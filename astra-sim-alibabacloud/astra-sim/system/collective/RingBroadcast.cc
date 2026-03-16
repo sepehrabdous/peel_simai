@@ -8,7 +8,8 @@
 
 namespace AstraSim {
 
-std::unordered_map<std::string, RingBroadcast*> RingBroadcast::root_waiters;
+std::unordered_map<std::string, RingBroadcast::RootCompletionState>
+    RingBroadcast::root_waiters;
 std::recursive_mutex RingBroadcast::root_waiters_mutex;
 
 RingBroadcast::RingBroadcast(
@@ -25,8 +26,8 @@ RingBroadcast::RingBroadcast(
   this->comType = type;
   this->id = id;
 
-  // Keep current behavior for choosing ring root.
-  // If later you want arbitrary roots from the caller, change this to:
+  // Keep your current ring-root behavior.
+  // If later you want arbitrary roots, change this to:
   // this->root = root;
   this->root = id - ring_topology->index_in_ring * ring_topology->offset;
 
@@ -49,7 +50,6 @@ RingBroadcast::RingBroadcast(
   this->recv_done = (id == this->root);
   this->send_done = false;
   this->exited = false;
-  this->drain_complete.store(false, std::memory_order_relaxed);
 
   const char* env_chunks = std::getenv("AS_RING_BCAST_CHUNKS");
   if (env_chunks != nullptr) {
@@ -116,30 +116,36 @@ std::string RingBroadcast::completion_key() const {
          std::to_string(static_cast<int>(direction));
 }
 
-void RingBroadcast::notify_root_drain_complete() {
+void RingBroadcast::notify_nonroot_exit() {
   std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
+
   auto it = root_waiters.find(completion_key());
-  if (it != root_waiters.end() && it->second != nullptr) {
-    RingBroadcast* root_alg = it->second;
-    root_alg->drain_complete.store(true, std::memory_order_release);
-    root_alg->maybe_exit();
+  if (it == root_waiters.end()) {
+    return;
+  }
+
+  it->second.completed_nonroots++;
+
+  if (it->second.root_alg != nullptr &&
+      it->second.completed_nonroots >= it->second.expected_nonroots) {
+    it->second.root_alg->maybe_exit();
   }
 }
 
-void RingBroadcast::post_data_recv(int src, int vnet) {
+void RingBroadcast::post_data_recv() {
   if (!enabled || is_root() || posted_data_recvs >= num_chunks) {
     return;
   }
 
   sim_request rcv_req;
-  rcv_req.vnet = vnet;
+  rcv_req.vnet = this->stream->current_queue_id;
   rcv_req.layerNum = layer_num;
 
   RecvPacketEventHadndlerData* ehd = new RecvPacketEventHadndlerData(
       stream,
       stream->owner->id,
       EventType::PacketReceived,
-      vnet,
+      stream->current_queue_id,
       stream->stream_num);
 
   stream->owner->front_end_sim_recv(
@@ -147,7 +153,7 @@ void RingBroadcast::post_data_recv(int src, int vnet) {
       Sys::dummy_data,
       msg_size,
       UINT8,
-      src,
+      current_sender,
       stream->stream_num,
       &rcv_req,
       &Sys::handleEvent,
@@ -161,11 +167,10 @@ void RingBroadcast::stage_data_packet(bool from_npu) {
     return;
   }
 
+  // Match Ring-style packet metadata.
   packets.push_back(
       MyPacket(stream->current_queue_id, current_sender, current_receiver));
   packets.back().sender = nullptr;
-
-  // IMPORTANT: initialize packet metadata explicitly.
   packets.back().stream_num = stream->stream_num;
 
   locked_packets.push_back(&packets.back());
@@ -239,8 +244,9 @@ bool RingBroadcast::ready() {
       &Sys::handleEvent,
       nullptr);
 
+  // Intermediate nodes self-clock the next recv after forwarding.
   if (!is_root() && !is_last() && posted_data_recvs < num_chunks) {
-    post_data_recv(packet.preferred_src, packet.preferred_vnet);
+    post_data_recv();
   }
 
   packets.pop_front();
@@ -258,15 +264,30 @@ void RingBroadcast::maybe_exit() {
   }
 
   if (is_root()) {
-    if (!drain_complete.load(std::memory_order_acquire)) {
-      return;
+    int completed_nonroots = 0;
+    int expected_nonroots = nodes_in_ring - 1;
+
+    {
+      std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
+      auto it = root_waiters.find(completion_key());
+      if (it != root_waiters.end()) {
+        completed_nonroots = it->second.completed_nonroots;
+        expected_nonroots = it->second.expected_nonroots;
+      }
     }
+
     if (chunks_staged < num_chunks || chunks_sent < num_chunks) {
       return;
     }
+
+    if (completed_nonroots < expected_nonroots) {
+      return;
+    }
+
     if (!packets.empty() || !locked_packets.empty()) {
       return;
     }
+
     exit();
     return;
   }
@@ -305,9 +326,7 @@ void RingBroadcast::run(EventType event, CallData* data) {
 
     if (is_last()) {
       if (chunks_received < num_chunks) {
-        post_data_recv(current_sender, stream->current_queue_id);
-      } else {
-        notify_root_drain_complete();
+        post_data_recv();
       }
     } else {
       stage_data_packet(false);
@@ -330,11 +349,15 @@ void RingBroadcast::run(EventType event, CallData* data) {
     if (is_root()) {
       {
         std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
-        root_waiters[completion_key()] = this;
+        RootCompletionState state;
+        state.root_alg = this;
+        state.completed_nonroots = 0;
+        state.expected_nonroots = nodes_in_ring - 1;
+        root_waiters[completion_key()] = state;
       }
       stage_data_packet(true);
     } else {
-      post_data_recv(current_sender, stream->current_queue_id);
+      post_data_recv();
     }
 
     return;
@@ -347,19 +370,22 @@ void RingBroadcast::exit() {
   }
   exited = true;
 
+  if (packets.size() != 0) {
+    packets.clear();
+  }
+
+  if (locked_packets.size() != 0) {
+    locked_packets.clear();
+  }
+
   if (is_root()) {
     std::lock_guard<std::recursive_mutex> lock(root_waiters_mutex);
     auto it = root_waiters.find(completion_key());
-    if (it != root_waiters.end() && it->second == this) {
+    if (it != root_waiters.end() && it->second.root_alg == this) {
       root_waiters.erase(it);
     }
-  }
-
-  if (!packets.empty()) {
-    packets.clear();
-  }
-  if (!locked_packets.empty()) {
-    locked_packets.clear();
+  } else {
+    notify_nonroot_exit();
   }
 
   stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);

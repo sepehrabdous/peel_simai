@@ -5,7 +5,6 @@
 #include <math.h>
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -29,6 +28,15 @@ namespace AstraSim {
 
 class RingBroadcast : public Algorithm {
  public:
+  struct RootCompletionState {
+    RingBroadcast* root_alg;
+    int completed_nonroots;
+    int expected_nonroots;
+
+    RootCompletionState()
+        : root_alg(nullptr), completed_nonroots(0), expected_nonroots(0) {}
+  };
+
   RingTopology::Direction direction;
   MemBus::Transmition transmition;
 
@@ -54,7 +62,6 @@ class RingBroadcast : public Algorithm {
   bool recv_done;
   bool send_done;
   bool exited;
-  std::atomic<bool> drain_complete;
 
   int num_chunks;
   int chunks_staged;
@@ -64,7 +71,7 @@ class RingBroadcast : public Algorithm {
 
   uint64_t AS_RING_BCAST_CHUNKS = 1;
 
-  static std::unordered_map<std::string, RingBroadcast*> root_waiters;
+  static std::unordered_map<std::string, RootCompletionState> root_waiters;
   static std::recursive_mutex root_waiters_mutex;
 
   RingBroadcast(
@@ -84,9 +91,9 @@ class RingBroadcast : public Algorithm {
   bool is_last() const;
 
   std::string completion_key() const;
-  void notify_root_drain_complete();
+  void notify_nonroot_exit();
 
-  void post_data_recv(int src, int vnet);
+  void post_data_recv();
   void stage_data_packet(bool from_npu);
   void release_packets();
   bool ready();
