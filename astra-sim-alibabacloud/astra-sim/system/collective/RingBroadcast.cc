@@ -22,7 +22,7 @@ RingBroadcast::RingBroadcast(
   this->comType = type;
   this->id = id;
 
-  // Keep current ring-root behavior.
+  // Keep your current ring-root behavior.
   // If later you want arbitrary roots, change this to:
   // this->root = root;
   this->root = id - ring_topology->index_in_ring * ring_topology->offset;
@@ -44,11 +44,6 @@ RingBroadcast::RingBroadcast(
   this->send_done = false;
   this->exited = false;
 
-  this->chunks_sent = 0;
-  this->chunks_received = 0;
-  this->next_chunk_to_post = 0;
-  this->recv_chunk_posted = -1;
-
   const char* env_chunks = std::getenv("AS_RING_BCAST_CHUNKS");
   if (env_chunks != nullptr) {
     unsigned long long tmp = std::strtoull(env_chunks, nullptr, 10);
@@ -67,22 +62,20 @@ RingBroadcast::RingBroadcast(
     this->num_chunks = 1;
   }
 
-  // Do not create more chunks than bytes.
+  // Avoid creating zero-byte chunks.
   if (data_size > 0 && static_cast<uint64_t>(this->num_chunks) > data_size) {
     this->num_chunks = static_cast<int>(data_size);
   }
-
   if (this->num_chunks <= 0) {
     this->num_chunks = 1;
   }
 
-  // Reserve low bits of the tag for the chunk index.
-  // Keep this comfortably above any chunk count you plan to use.
+  // We encode chunk_idx into the transport tag.
   static constexpr int kChunkTagStride = 4096;
   if (this->num_chunks >= kChunkTagStride) {
     if (id == 0) {
       std::cout << "RingBroadcast: AS_RING_BCAST_CHUNKS=" << this->num_chunks
-                << " is too large for the current chunk tag encoding; "
+                << " is too large for current chunk tag encoding; "
                 << "falling back to 1 chunk." << std::endl;
     }
     this->num_chunks = 1;
@@ -93,9 +86,15 @@ RingBroadcast::RingBroadcast(
   this->remainder_bytes =
       (this->num_chunks == 0) ? 0 : (data_size % this->num_chunks);
 
-  // Keep msg_size initialized for compatibility/debug prints, but actual send
-  // and recv sizes come from chunk_size_bytes().
+  // Kept for compatibility/debug prints. Actual send/recv size is computed
+  // per chunk.
   this->msg_size = this->base_chunk_size;
+
+  this->chunks_staged = 0;
+  this->chunks_sent = 0;
+  this->chunks_received = 0;
+  this->next_chunk_to_post = 0;
+  this->recv_chunk_posted = -1;
 
   this->name = Name::Ring;
   this->enabled = true;
@@ -120,20 +119,15 @@ bool RingBroadcast::is_last() const {
 
 int RingBroadcast::chunk_tag(int chunk_idx) const {
   static constexpr int kChunkTagStride = 4096;
-  assert(chunk_idx >= 0);
-  assert(chunk_idx < num_chunks);
-  assert(num_chunks < kChunkTagStride);
   return stream->stream_num * kChunkTagStride + chunk_idx;
 }
 
 uint64_t RingBroadcast::chunk_size_bytes(int chunk_idx) const {
-  assert(chunk_idx >= 0);
-  assert(chunk_idx < num_chunks);
   return base_chunk_size +
          ((static_cast<uint64_t>(chunk_idx) < remainder_bytes) ? 1ULL : 0ULL);
 }
 
-void RingBroadcast::post_recv(int chunk_idx) {
+void RingBroadcast::post_data_recv(int chunk_idx) {
   if (!enabled || is_root()) {
     return;
   }
@@ -172,7 +166,7 @@ void RingBroadcast::post_recv(int chunk_idx) {
   recv_chunk_posted = chunk_idx;
 }
 
-void RingBroadcast::stage_packet(int chunk_idx, bool from_npu) {
+void RingBroadcast::stage_data_packet(int chunk_idx, bool from_npu) {
   if (!enabled) {
     return;
   }
@@ -180,7 +174,8 @@ void RingBroadcast::stage_packet(int chunk_idx, bool from_npu) {
     return;
   }
 
-  packets.push_back(MyPacket(stream->current_queue_id, id, current_receiver));
+  packets.push_back(
+      MyPacket(stream->current_queue_id, current_sender, current_receiver));
   packets.back().sender = nullptr;
   packets.back().stream_num = chunk_tag(chunk_idx);
 
@@ -192,6 +187,7 @@ void RingBroadcast::stage_packet(int chunk_idx, bool from_npu) {
   send_from_npu = from_npu;
 
   release_packets(chunk_size_bytes(chunk_idx));
+  chunks_staged++;
 }
 
 void RingBroadcast::release_packets(uint64_t packet_size) {
@@ -228,7 +224,7 @@ bool RingBroadcast::ready() {
     stream->changeState(StreamState::Executing);
   }
 
-  if (!enabled || packets.size() == 0 || free_packets == 0) {
+  if (!enabled || packets.empty() || free_packets == 0) {
     return false;
   }
 
@@ -256,15 +252,6 @@ bool RingBroadcast::ready() {
       &Sys::handleEvent,
       nullptr);
 
-  // After forwarding one chunk, immediately make room for the next inbound
-  // chunk if this is a relay node and no recv is currently outstanding.
-  if (!is_root() && recv_chunk_posted == -1 && next_chunk_to_post < num_chunks) {
-    post_recv(next_chunk_to_post);
-    if (recv_chunk_posted != -1) {
-      next_chunk_to_post++;
-    }
-  }
-
   packets.pop_front();
   packet_chunks.pop_front();
   free_packets--;
@@ -280,6 +267,9 @@ void RingBroadcast::maybe_exit() {
   }
 
   if (is_root()) {
+    if (chunks_staged < num_chunks) {
+      return;
+    }
     if (chunks_sent < num_chunks) {
       return;
     }
@@ -312,17 +302,24 @@ void RingBroadcast::maybe_exit() {
 void RingBroadcast::run(EventType event, CallData* data) {
   if (event == EventType::General) {
     free_packets += 1;
+
     ready();
+
+    // Root stages the next chunk only after the previous local packetization
+    // step has completed.
+    if (is_root() && chunks_staged < num_chunks) {
+      stage_data_packet(chunks_staged, true);
+    }
+
     maybe_exit();
     return;
   }
 
   if (event == EventType::PacketReceived) {
-    // The recv we posted corresponds to exactly one chunk. Remember which one,
-    // clear the outstanding-recv marker, then post the next chunk recv.
     int received_chunk = recv_chunk_posted;
-    if (received_chunk == -1) {
-      // Defensive fallback; this should not normally happen.
+
+    // Defensive fallback in case bookkeeping and callback ordering ever drift.
+    if (received_chunk < 0 || received_chunk >= num_chunks) {
       received_chunk = chunks_received;
     }
 
@@ -330,16 +327,17 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
+    // Post the next receive immediately so the incoming pipeline can continue.
     if (next_chunk_to_post < num_chunks) {
-      post_recv(next_chunk_to_post);
+      post_data_recv(next_chunk_to_post);
       if (recv_chunk_posted != -1) {
         next_chunk_to_post++;
       }
     }
 
     if (!is_last()) {
-      // Forward the same chunk that just arrived.
-      stage_packet(received_chunk, false);
+      // Forward exactly the chunk that arrived.
+      stage_data_packet(received_chunk, false);
     }
 
     maybe_exit();
@@ -357,13 +355,9 @@ void RingBroadcast::run(EventType event, CallData* data) {
     }
 
     if (is_root()) {
-      // Stage all chunks up front. Each completion from MA/NPU will generate a
-      // General event and drive one network send from ready().
-      for (int i = 0; i < num_chunks; i++) {
-        stage_packet(i, true);
-      }
+      stage_data_packet(0, true);
     } else {
-      post_recv(next_chunk_to_post);
+      post_data_recv(next_chunk_to_post);
       if (recv_chunk_posted != -1) {
         next_chunk_to_post++;
       }
@@ -379,18 +373,17 @@ void RingBroadcast::exit() {
   }
   exited = true;
 
-  if (packets.size() != 0) {
+  if (!packets.empty()) {
     packets.clear();
   }
 
-  if (locked_packets.size() != 0) {
+  if (!locked_packets.empty()) {
     locked_packets.clear();
   }
 
   packet_chunks.clear();
 
   stream->owner->proceed_to_next_vnet_baseline((StreamBaseline*)stream);
-  return;
 }
 
 }  // namespace AstraSim
