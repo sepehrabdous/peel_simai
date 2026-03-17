@@ -96,6 +96,10 @@ RingBroadcast::RingBroadcast(
   this->next_chunk_to_post = 0;
   this->recv_chunk_posted = -1;
 
+  this->completion_ack_posted = false;
+  this->completion_ack_received = false;
+  this->completion_ack_sent = false;
+
   this->name = Name::Ring;
   this->enabled = true;
   if (boost_mode) {
@@ -125,6 +129,70 @@ int RingBroadcast::chunk_tag(int chunk_idx) const {
 uint64_t RingBroadcast::chunk_size_bytes(int chunk_idx) const {
   return base_chunk_size +
          ((static_cast<uint64_t>(chunk_idx) < remainder_bytes) ? 1ULL : 0ULL);
+}
+
+int RingBroadcast::completion_ack_tag() const {
+  static constexpr int kChunkTagStride = 4096;
+  return stream->stream_num * kChunkTagStride + (kChunkTagStride - 1);
+}
+
+void RingBroadcast::post_completion_ack_recv() {
+  if (!enabled || !is_root() || completion_ack_posted) {
+    return;
+  }
+
+  sim_request rcv_req;
+  rcv_req.vnet = this->stream->current_queue_id;
+  rcv_req.layerNum = layer_num;
+
+  RecvPacketEventHadndlerData* ehd = new RecvPacketEventHadndlerData(
+      stream,
+      stream->owner->id,
+      EventType::PacketReceived,
+      stream->current_queue_id,
+      completion_ack_tag());
+
+  // Root receives the completion ack from its sender in the ring,
+  // which is the last node in the broadcast chain.
+  stream->owner->front_end_sim_recv(
+      0,
+      Sys::dummy_data,
+      1,  // tiny completion token
+      UINT8,
+      current_sender,
+      completion_ack_tag(),
+      &rcv_req,
+      &Sys::handleEvent,
+      ehd);
+
+  completion_ack_posted = true;
+}
+
+void RingBroadcast::send_completion_ack() {
+  if (!enabled || !is_last() || completion_ack_sent) {
+    return;
+  }
+
+  sim_request snd_req;
+  snd_req.srcRank = id;
+  snd_req.dstRank = current_receiver;  // root
+  snd_req.tag = completion_ack_tag();
+  snd_req.reqType = UINT8;
+  snd_req.vnet = this->stream->current_queue_id;
+  snd_req.layerNum = layer_num;
+
+  stream->owner->front_end_sim_send(
+      0,
+      Sys::dummy_data,
+      1,  // tiny completion token
+      UINT8,
+      current_receiver,
+      completion_ack_tag(),
+      &snd_req,
+      &Sys::handleEvent,
+      nullptr);
+
+  completion_ack_sent = true;
 }
 
 void RingBroadcast::post_data_recv(int chunk_idx) {
@@ -276,6 +344,9 @@ void RingBroadcast::maybe_exit() {
     if (!packets.empty() || !locked_packets.empty()) {
       return;
     }
+    if (!completion_ack_received) {
+      return;
+    }
     exit();
     return;
   }
@@ -285,6 +356,10 @@ void RingBroadcast::maybe_exit() {
   }
 
   if (!is_last() && chunks_sent < num_chunks) {
+    return;
+  }
+
+  if (is_last() && !completion_ack_sent) {
     return;
   }
 
@@ -316,9 +391,16 @@ void RingBroadcast::run(EventType event, CallData* data) {
   }
 
   if (event == EventType::PacketReceived) {
+    // Root does not receive broadcast data in this algorithm.
+    // The only receive posted on root is the final completion ack.
+    if (is_root()) {
+      completion_ack_received = true;
+      maybe_exit();
+      return;
+    }
+
     int received_chunk = recv_chunk_posted;
 
-    // Defensive fallback in case bookkeeping and callback ordering ever drift.
     if (received_chunk < 0 || received_chunk >= num_chunks) {
       received_chunk = chunks_received;
     }
@@ -327,7 +409,6 @@ void RingBroadcast::run(EventType event, CallData* data) {
     chunks_received++;
     recv_done = (chunks_received == num_chunks);
 
-    // Post the next receive immediately so the incoming pipeline can continue.
     if (next_chunk_to_post < num_chunks) {
       post_data_recv(next_chunk_to_post);
       if (recv_chunk_posted != -1) {
@@ -336,8 +417,11 @@ void RingBroadcast::run(EventType event, CallData* data) {
     }
 
     if (!is_last()) {
-      // Forward exactly the chunk that arrived.
       stage_data_packet(received_chunk, false);
+    } else if (chunks_received == num_chunks) {
+      // Last node has received the final chunk: notify root that the
+      // end-to-end broadcast is really complete.
+      send_completion_ack();
     }
 
     maybe_exit();
@@ -355,6 +439,7 @@ void RingBroadcast::run(EventType event, CallData* data) {
     }
 
     if (is_root()) {
+      post_completion_ack_recv();
       stage_data_packet(0, true);
     } else {
       post_data_recv(next_chunk_to_post);
@@ -365,6 +450,7 @@ void RingBroadcast::run(EventType event, CallData* data) {
 
     return;
   }
+  
 }
 
 void RingBroadcast::exit() {

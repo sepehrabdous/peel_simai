@@ -88,6 +88,17 @@ class RingBroadcast : public Algorithm {
   bool ready();
   void maybe_exit();
   void exit();
+
+  // add near the other state variables
+    bool completion_ack_posted;
+    bool completion_ack_received;
+    bool completion_ack_sent;
+
+    // add near chunk_tag/chunk_size_bytes declarations
+    int completion_ack_tag() const;
+    void post_completion_ack_recv();
+    void send_completion_ack();
+    
 };
 
 }  // namespace AstraSim
