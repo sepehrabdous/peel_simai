@@ -243,7 +243,7 @@ void RingBroadcast::stage_data_packet(int chunk_idx, bool from_npu) {
   }
 
   packets.push_back(
-      MyPacket(stream->current_queue_id, current_sender, current_receiver));
+      MyPacket(stream->current_queue_id, id, current_receiver));
   packets.back().sender = nullptr;
   packets.back().stream_num = chunk_tag(chunk_idx);
 
