@@ -107,6 +107,7 @@ class AstraNetworkAPI {
     this->rank = rank;
     return this->rank;
   };
+  virtual int dump_sim_stats() {return 0;}
   virtual int sim_finish() = 0;
   virtual double sim_time_resolution() = 0;
   virtual int sim_init(AstraMemoryAPI* MEM) = 0;

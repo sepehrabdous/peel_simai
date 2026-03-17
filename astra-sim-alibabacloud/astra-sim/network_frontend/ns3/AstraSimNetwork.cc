@@ -71,19 +71,26 @@ public:
   }
   ~ASTRASimNetwork() {}
   int sim_comm_size(AstraSim::sim_comm comm, int *size) { return 0; }
-  int sim_finish() {
+  int dump_sim_stats() {
     for (auto it = nodeHash.begin(); it != nodeHash.end(); it++) {
-      pair<int, int> p = it->first;
+      std::pair<int, int> p = it->first;
       if (p.second == 0) {
-        std::cout << "sim_finish on sent, " << " Thread id: " << pthread_self() << std::endl;
-        cout << "All data sent from node " << p.first << " is " << it->second
-             << "\n";
+        std::cout << "sim_finish on sent, "
+                  << " Thread id: " << pthread_self() << std::endl;
+        std::cout << "All data sent from node " << p.first << " is "
+                  << it->second << "\n";
       } else {
-        std::cout << "sim_finish on received, " << " Thread id: " << pthread_self() << std::endl;
-        cout << "All data received by node " << p.first << " is " << it->second
-             << "\n";
+        std::cout << "sim_finish on received, "
+                  << " Thread id: " << pthread_self() << std::endl;
+        std::cout << "All data received by node " << p.first << " is "
+                  << it->second << "\n";
       }
     }
+    return 0;
+  }
+
+  int sim_finish() {
+    dump_sim_stats();
     exit(0);
     return 0;
   }

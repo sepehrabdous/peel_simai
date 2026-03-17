@@ -25,6 +25,7 @@ class ASTRASimNetwork: AstraSim::AstraNetworkAPI{
         int sim_comm_size(AstraSim::sim_comm comm, int* size){
             return 0;
         }
+        int dump_sim_stats();
         int sim_finish(){
             return 0;
         }

@@ -420,6 +420,8 @@ class Sys : public Callable {
   struct MockNccl::ncclInfo* get_nccl_Info(ParallelStrategy comm_ps, uint64_t data_size, ComType collective_type);
   bool mock_nccl_comms_init();
   bool mock_nccl_grobal_group_init();
+
+  static std::atomic<bool> sim_stats_dumped;
 };
 } // namespace AstraSim
 #endif

@@ -43,6 +43,8 @@ Tick Sys::offset = 0;
 uint8_t* Sys::dummy_data = new uint8_t[2];
 std::vector<Sys*> Sys::all_generators;
 
+std::atomic<bool> Sys::sim_stats_dumped(false);
+
 Sys::~Sys() {
   end_sim_time = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::minutes>(
@@ -70,6 +72,14 @@ Sys::~Sys() {
               << (((double)streams_finished) / streams_injected) * 100 << " %"
               << std::endl
               << "*****" << std::endl;
+    
+    // sepehr
+    if (NI != nullptr) {
+      bool expected = false;
+      if (sim_stats_dumped.compare_exchange_strong(expected, true)) {
+        NI->dump_sim_stats();
+      }
+    }
   }
   #ifndef PHY_MTP
   all_generators[id + npu_offset] = nullptr;
