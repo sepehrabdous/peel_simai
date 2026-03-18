@@ -3,6 +3,24 @@ This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
+// Sys.cc — The central simulator node ("system") in AstraSim.
+//
+// Each Sys instance represents one NPU (GPU/accelerator) in the simulated
+// cluster.  It owns:
+//   - The workload (Layer-by-layer DNN training loop)
+//   - The logical topologies for every collective type (AllReduce, etc.)
+//   - A SchedulerUnit that decides how many streams to run concurrently
+//   - A queue/priority system (active_Streams, ready_list) for in-flight
+//     collective streams
+//   - Wrappers around the network interface (NI) for send/recv
+//
+// High-level call flow for a collective:
+//   Workload → generate_all_reduce / generate_broadcast / …
+//            → generate_collective          (splits data into chunks/streams)
+//            → generate_collective_phase    (picks the algorithm per dim)
+//            → StreamBaseline / RingBroadcast / Ring / …
+//            → sim_send / sim_recv          (calls into the network back-end)
+
 #include "Sys.hh"
 #include "BaseStream.hh"
 #include "DataSet.hh"
@@ -35,16 +53,25 @@ LICENSE file in the root directory of this source tree.
 #include <cmath>
 #include <numeric>
 
+// Singleton NCCL group used by all ranks for the MockNccl flow-model path.
 MockNccl::MockNcclGroup* GlobalGroup = nullptr;
 
 namespace AstraSim {
+// Mutex-like flag to protect sections that must not run concurrently (NS3/PHY
+// multi-thread modes).
 std::atomic<bool> Sys::g_sys_inCriticalSection(false);
+// Global tick offset applied by boostedTick() for synchronisation purposes.
 Tick Sys::offset = 0;
+// Tiny scratch buffer reused for zero-byte / placeholder network messages.
 uint8_t* Sys::dummy_data = new uint8_t[2];
+// One entry per rank; used to look up any live Sys from a static context.
 std::vector<Sys*> Sys::all_generators;
-
+// Ensures dump_sim_stats() is called exactly once even when ranks share a
+// destructor path.
 std::atomic<bool> Sys::sim_stats_dumped(false);
 
+// Destructor — prints a final summary on rank 0, cleans up all heap-allocated
+// objects, and triggers exitSimLoop once the last surviving rank is destroyed.
 Sys::~Sys() {
   end_sim_time = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::minutes>(
@@ -109,8 +136,9 @@ Sys::~Sys() {
     delete workload;
   if (offline_greedy != nullptr)
     delete offline_greedy;
+  // Only call exitSimLoop when every rank has been destroyed, so the
+  // simulation back-end is not terminated prematurely.
   bool shouldExit = true;
-  
   for(int i = 0; i < num_gpus; ++ i) {
     auto& a = all_generators[i];
     if (a != nullptr) {
@@ -118,7 +146,6 @@ Sys::~Sys() {
       break;
     }
   }
-
   if (shouldExit) {
     exitSimLoop("Exiting");
   }
@@ -127,6 +154,26 @@ Sys::~Sys() {
   #endif
 }
 
+// Constructor — initialises all subsystems for one simulated NPU.
+// Called once per rank at simulation start.
+//
+// Parameters (brief):
+//   NI              – network back-end (NS3 / gem5 / analytical)
+//   MEM             – memory model (can be nullptr for zero-latency)
+//   id              – 0-based rank index within the logical group
+//   npu_offset      – offset into all_generators[] for multi-group runs
+//   num_passes      – number of training iterations to simulate
+//   physical_dims   – number of nodes along each network dimension
+//   queues_per_dim  – number of virtual queues per dimension
+//   my_sys          – path to the system configuration file
+//   my_workload     – path to the workload (layer) description file
+//   comm/compute/injection_scale – scaling factors for bandwidth/compute/BW
+//   total_stat_rows / stat_row   – for per-layer statistics aggregation
+//   path / run_name              – output directory and experiment label
+//   seprate_log     – write separate log files per rank
+//   rendezvous_enabled – use two-sided rendezvous protocol for sends
+//   _gpu_type / _all_gpus / _NVSwitchs / _ngpus_per_node
+//                   – hardware topology for MockNccl flow-model path
 Sys::Sys(
     AstraNetworkAPI* NI,
     AstraMemoryAPI* MEM,
@@ -249,13 +296,15 @@ Sys::Sys(
   all_queues = 0;
   total_nodes = 1;
 
-  /*
-    when the simulator “creates streams” (NCCL-like rings, chunks, etc.), it can push work onto these per-queue lists and schedule them with priorities.
-  */
-
+  // Build per-queue data structures.
+  // Each dimension can have multiple virtual queues (vnets); streams are
+  // dispatched onto them with priorities so the scheduler can pipeline
+  // multiple in-flight chunks per dimension.
   for (int current_dim = 0; current_dim < queues_per_dim.size();
        current_dim++) {
     all_queues += queues_per_dim[current_dim];
+    // In boost_mode only the “master” rank in each dimension is active;
+    // all others are disabled to reduce simulation overhead.
     bool enabled = !boost_mode;
     if (id % total_nodes == 0 &&
         id < total_nodes * physical_dims[current_dim]) {
@@ -275,6 +324,7 @@ Sys::Sys(
       element++;
     }
   }
+  // If every queue is disabled this node contributes no traffic; disable NI.
   if (all_queues == total_disabled) {
     NI->enabled = false;
     std::cout << "Node " << id << " has been totally disabled" << std::endl;
@@ -382,6 +432,16 @@ Sys::Sys(
   this->initialized = true;
 }
 
+// break_dimension — splits one physical dimension into two logical sub-dims
+// to support tensor/model parallelism.
+//
+// When model_parallel_npu_group > 1 the physical topology must be "broken"
+// so that a subset of ranks forms the TP group while the remainder is used
+// for data parallelism.  The function rebuilds the logical topologies and
+// all per-dimension collective-implementation vectors accordingly.
+//
+// Returns the index of the dimension that was split, or -1 if no split was
+// needed (model_parallel_npu_group == 1 or it aligned exactly).
 int Sys::break_dimension(int model_parallel_npu_group) {
   if (model_parallel_npu_group == 1) {
     return -1;
@@ -502,6 +562,10 @@ int Sys::break_dimension(int model_parallel_npu_group) {
 int Sys::get_layer_numbers(std::string workload_input) {
   return Workload::get_layer_numbers(workload_input);
 }
+// get_priority — returns the next stream priority value.
+// Under LIFO the counter increments (higher value = higher priority for LIFO
+// insertion), under FIFO it decrements.  A pref_scheduling of HIGHEST
+// always returns a very large constant so the stream goes to the front.
 int Sys::get_priority(SchedulingPolicy pref_scheduling) {
   if (pref_scheduling == SchedulingPolicy::None) {
     if (scheduling_policy == SchedulingPolicy::LIFO) {
@@ -519,6 +583,10 @@ int Sys::get_priority(SchedulingPolicy pref_scheduling) {
     }
   }
 }
+// rendezvous_sim_send — implements the sender side of the two-sided rendezvous
+// handshake.  Before sending the actual payload it posts a small (8 KB) recv
+// for the matching "ready-to-receive" token from the destination, stored in a
+// RendezvousSendData object that carries the original send parameters.
 int Sys::rendezvous_sim_send(
     Tick delay,
     void* buffer,
@@ -550,6 +618,16 @@ int Sys::rendezvous_sim_send(
       rsd);
   return 1;
 }
+// sim_send — core send primitive.
+//
+// If delay == 0 the message is injected immediately (or queued behind a
+// previous in-flight send to the same (dst, tag) pair to preserve ordering).
+// If delay > 0 the send is wrapped in a SimSendCaller and scheduled via the
+// event queue so it fires after the requested number of cycles.
+//
+// The is_there_pending_sends / pending_sends maps serialise sends to the same
+// (dst, tag) destination so that multiple chunks of the same stream do not
+// race at the network interface.
 int Sys::sim_send(
     Tick delay,
     void* buffer,
@@ -613,6 +691,8 @@ int Sys::sim_send(
   }
   return 1;
 }
+// front_end_sim_send — public send entry point used by collective algorithms.
+// Routes to rendezvous_sim_send or the eager sim_send depending on the flag.
 int Sys::front_end_sim_send(
     Tick delay,
     void* buffer,
@@ -631,6 +711,9 @@ int Sys::front_end_sim_send(
         delay, buffer, count, type, dst, tag, request, msg_handler, fun_arg);
   }
 }
+// rendezvous_sim_recv — receiver side of the rendezvous handshake.
+// Posts the small "ready" token send to the sender, then waits for the real
+// payload via RendezvousRecvData.
 int Sys::rendezvous_sim_recv(
     Tick delay,
     void* buffer,
@@ -662,6 +745,8 @@ int Sys::rendezvous_sim_recv(
       rrd);
   return 1;
 }
+// sim_recv — core receive primitive; mirrors sim_send.
+// Passes through immediately (delay == 0) or schedules via a SimRecvCaller.
 int Sys::sim_recv(
     Tick delay,
     void* buffer,
@@ -692,6 +777,7 @@ int Sys::sim_recv(
   }
   return 1;
 }
+// front_end_sim_recv — public recv entry point; mirrors front_end_sim_send.
 int Sys::front_end_sim_recv(
     Tick delay,
     void* buffer,
@@ -710,6 +796,8 @@ int Sys::front_end_sim_recv(
         delay, buffer, count, type, src, tag, request, msg_handler, fun_arg);
   }
 }
+// mem_read / mem_write — translate a byte count into simulated cycles.
+// Returns a small constant (10 cycles) when no memory model is attached.
 Tick Sys::mem_read(uint64_t bytes) {
   if (MEM == nullptr) {
     return 10;
@@ -738,6 +826,10 @@ std::string Sys::trim(
 
   return str.substr(strBegin, strRange);
 }
+// generate_collective_implementation_from_input — parses a
+// underscore-separated string like "ring_halvingDoubling" and returns one
+// CollectiveImplementation object per dimension.  This is the single place
+// where algorithm names from the sys config file are mapped to enum values.
 std::vector<CollectiveImplementation*> Sys::
     generate_collective_implementation_from_input(std::string input) {
   std::vector<std::string> inputs_per_dimension = split_string(input, "_");
@@ -786,6 +878,9 @@ std::vector<CollectiveImplementation*> Sys::
   }
   return result;
 }
+// parse_var — processes a single "key: value" pair read from the sys config
+// file and updates the corresponding member variable.  Unknown keys cause a
+// fatal exit so that typos in config files are caught early.
 bool Sys::parse_var(std::string var, std::string value) {
   var = trim(var);
   value = trim(value);
@@ -895,6 +990,9 @@ bool Sys::parse_var(std::string var, std::string value) {
   }
   return true;
 }
+// post_process_inputs — called after all key/value pairs have been parsed.
+// Converts the raw string fields (inp_*) into typed enums / per-dimension
+// implementation vectors so the rest of the code never has to re-parse them.
 bool Sys::post_process_inputs() {
 
   if (id == 0) {
@@ -971,6 +1069,8 @@ bool Sys::post_process_inputs() {
   return true;
 }
 
+// initialize_sys — opens the system config file and drives the
+// parse_var / post_process_inputs pipeline line by line.
 bool Sys::initialize_sys(std::string name) {
   std::ifstream inFile;
   inFile.open(name);
@@ -1006,6 +1106,17 @@ bool Sys::initialize_sys(std::string name) {
   inFile.close();
   return post_process_inputs();
 }
+// SchedulerUnit — controls how many streams are allowed to run concurrently.
+//
+// It tracks per-queue counters (running_streams) and per-dimension latency
+// accumulators.  The three notify_* methods are the integration points:
+//   notify_stream_added_into_ready_list — a new stream became ready; schedule
+//     up to `max_running_streams` at once.
+//   notify_stream_added(vnet)           — a stream moved onto active_Streams
+//     for queue vnet; initialise as many waiting streams as the threshold
+//     allows.
+//   notify_stream_removed(vnet, time)   — a stream finished on queue vnet;
+//     record its latency and potentially unblock waiting streams.
 Sys::SchedulerUnit::SchedulerUnit(
     Sys* sys,
     std::vector<int> queues,
@@ -1099,6 +1210,8 @@ std::vector<double> Sys::SchedulerUnit::get_average_latency_per_dimension() {
   }
   return result;
 }
+// nextPowerOf2 — returns the smallest power of two >= n.
+// Used when computing ring sizes or halving-doubling steps.
 int Sys::nextPowerOf2(int n) {
   int count = 0;
   if (n && !(n & (n - 1)))
@@ -1132,7 +1245,9 @@ uint64_t Sys::determine_chunk_size(uint64_t size, ComType type) {
   return chunk_size;
 }
 
-// sepehr
+// generate_broadcast — entry point for a one-to-all broadcast collective.
+// Delegates to generate_collective with ComType::Broadcast and the Broadcast
+// logical topology/implementation.
 DataSet* Sys::generate_broadcast(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1160,6 +1275,7 @@ DataSet* Sys::generate_broadcast(
       layer_ptr);
 }
 
+// generate_all_reduce — entry point for the AllReduce collective.
 DataSet* Sys::generate_all_reduce(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1187,6 +1303,7 @@ DataSet* Sys::generate_all_reduce(
       layer_ptr);
 }
 
+// generate_all_gather — entry point for the AllGather collective.
 DataSet* Sys::generate_all_gather(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1214,6 +1331,7 @@ DataSet* Sys::generate_all_gather(
       layer_ptr);
 }
 
+// generate_reduce_scatter — entry point for the ReduceScatter collective.
 DataSet* Sys::generate_reduce_scatter(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1241,6 +1359,7 @@ DataSet* Sys::generate_reduce_scatter(
       layer_ptr);
 }
 
+// generate_all_to_all — entry point for the AllToAll collective.
 DataSet* Sys::generate_all_to_all(
     uint64_t size,
     std::vector<bool> involved_dimensions,
@@ -1268,6 +1387,19 @@ DataSet* Sys::generate_all_to_all(
       layer_ptr);
 }
 
+// generate_collective_phase — instantiates the concrete algorithm object for
+// one dimension of one chunk (a "phase").
+//
+// The mapping is:
+//   Ring / OneRing + Broadcast  → RingBroadcast
+//   Ring / OneRing + other      → Ring
+//   Direct / OneDirect          → AllToAll (window-based direct algorithm)
+//   DoubleBinaryTree            → DoubleBinaryTreeAllReduce
+//   HalvingDoubling / One-      → HalvingDoubling
+//   NcclFlowModel               → NcclTreeFlowModel  (ring or tree path
+//                                 chosen by get_nccl_Info)
+//   NcclTreeFlowModel           → NcclTreeFlowModel  (tree path)
+//   NcclFlowModel + NVLS        → NcclTreeFlowModel  (NVLS all-reduce)
 CollectivePhase Sys::generate_collective_phase(
     ComType collective_type,
     int layer_num,
@@ -1570,6 +1702,10 @@ std::map<std::pair<int,int>, MockNccl::SingleFlow> Sys::generate_nvl_test_flow_m
   return result;
 }
 
+// mock_nccl_grobal_group_init — creates the singleton GlobalGroup that holds
+// the hardware-topology info (GPU count, NVSwitch list, parallelism sizes)
+// used by MockNccl to choose ring/tree algorithms.  Called once; subsequent
+// ranks are no-ops because GlobalGroup is checked for nullptr.
 bool Sys::mock_nccl_grobal_group_init(){
   if (GlobalGroup != nullptr)
     return true;
@@ -1636,6 +1772,19 @@ std::shared_ptr<void> Sys::generate_flow_model(ParallelStrategy comm_ps, uint64_
     return  pComm->get_flow_model(data_size,collective_type,this->workload->index,current_state);
 }
 
+// generate_collective — the core stream-generation engine.
+//
+// Splits `size` bytes into chunks (preferred_dataset_splits or
+// OfflineGreedy decides how) and for each chunk:
+//   1. Determines the per-dimension traversal order (dim_mapper) based on
+//      inter_dimension_scheduling policy.
+//   2. For AllReduce with LocalBWAware optimisation, builds a
+//      ReduceScatter → AllGather phase sequence; otherwise falls through to
+//      the baseline which calls generate_collective_phase for each dimension.
+//   3. Wraps the phase list into a StreamBaseline and inserts it into the
+//      ready_list for the SchedulerUnit to pick up.
+//
+// Returns a DataSet that the caller (workload layer) registers a callback on.
 DataSet* Sys::generate_collective(
     uint64_t size,
     int layer_num,
@@ -1902,6 +2051,10 @@ DataSet* Sys::generate_collective(
   }
   return dataset;
 }
+// call_events — processes all callbacks scheduled for the current tick.
+// Invoked by iterate() each simulation step.  After draining the current
+// tick's list it checks whether this node is done (workload finished and no
+// pending events/sends) and self-destructs if so.
 void Sys::call_events() {
   if(event_queue.find(Sys::boostedTick())==event_queue.end()){
     goto FINISH_CHECK;
@@ -1936,6 +2089,9 @@ void Sys::exitSimLoop(std::string msg) {
   NI->sim_finish();
   return;
 }
+// boostedTick — returns the current simulation time as a cycle count,
+// adding the global `offset` (used for synchronisation between node groups).
+// Walks all_generators to find a live Sys if rank 0 has already been deleted.
 Tick Sys::boostedTick() {
   Sys* ts = all_generators[0];
   if (ts == nullptr) {
@@ -1950,6 +2106,16 @@ Tick Sys::boostedTick() {
   Tick tick = tmp.time_val / CLOCK_PERIOD;
   return tick + offset;
 }
+// proceed_to_next_vnet_baseline — advances a stream to its next collective
+// phase (vnet/queue).
+//
+// Steps:
+//  1. Averages the network-message latency for the completed phase.
+//  2. Deletes the completed algorithm object.
+//  3. If no phases remain → notifies the DataSet (stream finished).
+//  4. Otherwise pops the next phase from phases_to_go, inserts the stream
+//     into active_Streams for the new queue, and notifies the SchedulerUnit
+//     so it can kick off the next algorithm init.
 void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: phase1, stream->current_queue_id %d stream->phases_to_go.size %d",stream->current_queue_id,stream->phases_to_go.size());
@@ -2035,6 +2201,12 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
   NcclLog->writeLog(NcclLogLevel::DEBUG,"proceed_to_next_vnet_baseline :: exit");
 }
 void Sys::exiting() {}
+// insert_stream — inserts baseStream into a sorted queue according to the
+// active intra_dimension_scheduling policy:
+//   FIFO / AllReduce / AllToAll  — by priority (higher priority earlier)
+//   RG (Reduce-then-Gather)      — interleaves RS and AG phases for overlap
+//   SmallestFirst                — smaller data_size phases go first
+//   LessRemainingPhaseFirst      — fewest remaining phases go first
 void Sys::insert_stream(std::list<BaseStream*>* queue, BaseStream* baseStream) {
   std::list<BaseStream*>::iterator it = queue->begin();
   if (intra_dimension_scheduling == IntraDimensionScheduling::FIFO ||
@@ -2181,6 +2353,11 @@ void Sys::call(EventType type, CallData* data) {
     increase_finished_streams(1);
   }
 }
+// try_register_event — schedules a (callable, event, callData) tuple to fire
+// after `cycles` cycles.  Creates a new tick bucket in event_queue if none
+// exists for that tick, and calls NI->sim_schedule exactly once per bucket
+// (should_schedule guard) to avoid redundant simulator wake-ups.
+// Sets cycles = 0 on return (consumed).
 void Sys::try_register_event(
     Callable* callable,
     EventType event,
@@ -2231,6 +2408,8 @@ void Sys::insert_into_ready_list(BaseStream* stream) {
   insert_stream(&ready_list, stream);
   scheduler_unit->notify_stream_added_into_ready_list();
 }
+// schedule — moves up to `num` streams from the ready_list into the active
+// phase by calling proceed_to_next_vnet_baseline for each one.
 void Sys::schedule(int num) {
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
   int ready_list_size = ready_list.size();
@@ -2257,6 +2436,14 @@ void Sys::schedule(int num) {
   }
   NcclLog->writeLog(NcclLogLevel::DEBUG,"Sys::shedule finished");
 }
+// handleEvent — static callback registered with the network back-end.
+// Demultiplexes on EventType:
+//   CallEvents        — drain the event_queue for this tick (iterate())
+//   RendezvousSend/Recv — complete the rendezvous handshake
+//   PacketReceived    — deliver a received packet to its owning stream
+//   PacketSent        — clear the (dst, tag) send slot and issue any
+//                       queued-up pending_sends for that pair
+//   PacketSentFinished — NVLS/flow-model send-complete callback
 void Sys::handleEvent(void* arg) {
   if (arg == nullptr) { 
     return;
@@ -2349,6 +2536,8 @@ void Sys::handleEvent(void* arg) {
   }
 }
 
+// generate_time — converts a cycle count into the back-end's timespec_t by
+// multiplying by CLOCK_PERIOD (nanoseconds per cycle).
 AstraSim::timespec_t Sys::generate_time(int cycles) {
   timespec_t tmp = NI->sim_get_time();
   double addition = cycles * ((double)CLOCK_PERIOD);
