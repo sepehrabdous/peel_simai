@@ -9,3 +9,4 @@ test/log/
 .cur*
 .DS_Store
 *.csv
+send.txt

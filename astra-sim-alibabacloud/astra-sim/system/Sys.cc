@@ -198,30 +198,29 @@ Sys::Sys(
     std::vector<int>_NVSwitchs,
     int _ngpus_per_node) {
 
-  if (id == 0) {
-    std::cout
-        << "\nInitiating Sys with inputs:\n"
-        << "\t id: " << id << "\n"
-        << "\t npu_offset: " << npu_offset << "\n"
-        << "\t num_passes: " << num_passes << "\n"
-        << "\t physical_dims.size(): " << physical_dims.size() << "\n"
-        << "\t queues_per_dim.size(): " << queues_per_dim.size() << "\n"
-        << "\t my_sys: " << my_sys << "\n"
-        << "\t my_workload: " << my_workload << "\n"
-        << "\t comm_scale: " << comm_scale << "\n"
-        << "\t compute_scale: " << compute_scale << "\n"
-        << "\t injection_scale: " << injection_scale << "\n"
-        << "\t total_stat_rows: " << total_stat_rows << "\n"
-        << "\t stat_row: " << stat_row << "\n"
-        << "\t path: " << path << "\n"
-        << "\t run_name: " << run_name << "\n"
-        << "\t seprate_log: " << seprate_log << "\n"
-        << "\t rendezvous_enabled: " << rendezvous_enabled << "\n"
-        << "\t _gpu_type: " << static_cast<int>(_gpu_type) << "\n"
-        << "\t _all_gpus.size(): " << _all_gpus.size() << "\n"
-        << "\t _NVSwitchs.size(): " << _NVSwitchs.size() << "\n"
-        << "\t _ngpus_per_node: " << _ngpus_per_node << "\n";
-  }
+  std::cout
+      << "Initiating Sys with inputs:\n"
+      << "\t id: " << id << "\n"
+      << "\t npu_offset: " << npu_offset << "\n"
+      << "\t num_passes: " << num_passes << "\n"
+      << "\t physical_dims.size(): " << physical_dims.size() << "\n"
+      << "\t queues_per_dim.size(): " << queues_per_dim.size() << "\n"
+      << "\t my_sys: " << my_sys << "\n"
+      << "\t my_workload: " << my_workload << "\n"
+      << "\t comm_scale: " << comm_scale << "\n"
+      << "\t compute_scale: " << compute_scale << "\n"
+      << "\t injection_scale: " << injection_scale << "\n"
+      << "\t total_stat_rows: " << total_stat_rows << "\n"
+      << "\t stat_row: " << stat_row << "\n"
+      << "\t path: " << path << "\n"
+      << "\t run_name: " << run_name << "\n"
+      << "\t seprate_log: " << seprate_log << "\n"
+      << "\t rendezvous_enabled: " << rendezvous_enabled << "\n"
+      << "\t _gpu_type: " << static_cast<int>(_gpu_type) << "\n"
+      << "\t _all_gpus.size(): " << _all_gpus.size() << "\n"
+      << "\t _NVSwitchs.size(): " << _NVSwitchs.size() << "\n"
+      << "\t _ngpus_per_node: " << _ngpus_per_node << "\n"
+      << "-----------------------\n\n";
 
   scheduler_unit = nullptr;
   vLevels = nullptr;
@@ -1005,7 +1004,8 @@ bool Sys::post_process_inputs() {
       "\t inp_collective_optimization --> " << inp_collective_optimization << std::endl <<
       "\t inp_boost_mode --> " << inp_boost_mode << std::endl <<
       "\t inp_scheduling_policy --> " << inp_scheduling_policy << std::endl << 
-      "\t inp_model_shared_bus --> " << inp_model_shared_bus << std::endl;
+      "\t inp_model_shared_bus --> " << inp_model_shared_bus << std::endl << 
+      "\n";
   }
   
   // sepehr

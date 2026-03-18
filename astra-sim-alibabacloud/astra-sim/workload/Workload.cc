@@ -9,6 +9,11 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/MockNcclLog.h"
 
 namespace AstraSim {
+
+// Destructor: release all heap-allocated resources.
+// CSV writers (end_to_end, detailed, dimension_utilization) and the Layer
+// array are only allocated on node 0 / when seprate_log is set, so each
+// pointer is guarded by a nullptr check before deletion.
 Workload::~Workload() {
   if (end_to_end != nullptr) {
     delete end_to_end;
@@ -26,6 +31,19 @@ Workload::~Workload() {
     delete[] layers;
   }
 }
+// Constructor: initializes member variables and calls initialize_workload()
+// to parse the workload description file.  Only node 0 creates CSV log
+// writers; all other nodes skip the I/O setup entirely.
+//
+// Parameters:
+//   run_name    – identifier string used in output file names
+//   generator   – owning Sys node; used for scheduling and id checks
+//   name        – path to the workload input file
+//   TOTAL_PASS  – number of training/inference passes to simulate
+//   total_rows  – total CSV rows pre-allocated for statistics
+//   stat_row    – row offset at which this node writes its stats
+//   path        – directory where CSV output files are created
+//   seprate_log – when true, node 0 writes per-run CSV log files
 Workload::Workload(
     std::string run_name,
     Sys* generator,
@@ -45,7 +63,8 @@ Workload::Workload(
         << "\t total_rows: " << total_rows << "\n"
         << "\t stat_row: " << stat_row << "\n"
         << "\t path: " << path << "\n"
-        << "\t seprate_log: " << seprate_log << "\n";
+        << "\t seprate_log: " << seprate_log << "\n"
+        << "--------------------\n" << std::endl;
   }   
 
   this->initialized = false;
@@ -90,22 +109,32 @@ Workload::Workload(
   #endif
 }
 
+// Pre-allocates rows in the CSV writers so the simulation can write stats
+// without repeated resizing.  The +20 margin guards against minor over-runs.
+// The detailed CSV is only pre-allocated under NS3 MPI/MTP builds because
+// those back-ends require up-front reservation.
 void Workload::initialize_stat_files() {
   #ifdef NS3_MPI
   detailed->initialize_csv(SIZE * total_rows + 20, 50);
   #endif
-  #ifdef NS3_MTP 
+  #ifdef NS3_MTP
   detailed->initialize_csv(SIZE * total_rows + 20, 50);
   #endif
   end_to_end->initialize_csv(SIZE * total_rows + 20, 50);
 }
 
+// Entry point called by the event scheduler each time the workload needs
+// to advance.  Acts as a dispatcher: it first handles any residual compute
+// delay (counter > 0 means we are still "busy" for that many ticks), then
+// delegates to the parallelism-specific iterator.
 void Workload::call(EventType event, CallData* data) {
 
   if (generator->id == 0) {
       std::cout << "counter: " << counter << std::endl;
   }
 
+  // If there is outstanding compute time, re-register and yield.
+  // The scheduler will call us again after 'counter' ticks.
   if (counter > 0) {
     generator->try_register_event(
         this, EventType::Workload_Wait, NULL, counter);
@@ -160,6 +189,10 @@ void Workload::call(EventType event, CallData* data) {
 
 }
 
+// Collects per-layer statistics and reports them via the network interface.
+// Called once all passes are complete (on node 0 only under non-PHY_MTP builds).
+// Aggregates total compute time, exposed communication time, and per-phase
+// (fwd/wg/ig) times, then writes dimension utilization CSVs for NS3 builds.
 void Workload::report() {
   double total_compute = 0;
   double total_exposed = 0;
@@ -249,6 +282,15 @@ void Workload::report() {
   }
   #endif
 }
+// Called at the top of every iterate_* function to see whether all training
+// passes have been completed and in-flight collective streams have drained.
+//
+// Flow:
+//  1. If pass_counter has reached TOTAL_PASS, transition to Wait_For_Sim_Finish.
+//  2. If there are still outstanding streams, register for a callback and wait.
+//     Blocking on layer[0]'s weight-grad comm ensures we don't exit prematurely.
+//  3. Once all streams are finished, call report() (node 0 only) and signal
+//     the system that the workload is done.
 void Workload::check_for_sim_end() {
   if (pass_counter == TOTAL_PASS) {
     current_state = LoopState::Wait_For_Sim_Finish;
@@ -271,6 +313,10 @@ void Workload::check_for_sim_end() {
   }
   return;
 }
+// Micro-benchmark mode: issues weight-gradient collectives on a single layer
+// (identified by 'index') for every requested pass without any compute delay.
+// This is used to stress-test the collective communication subsystem in
+// isolation, bypassing the normal fwd/ig/wg training loop.
 void Workload::iterate_micro_benchmark() {
 
   if (generator->id == 0)
@@ -287,6 +333,20 @@ void Workload::iterate_micro_benchmark() {
   check_for_sim_end();
 }
 
+// Data-parallel training loop.  All NPUs hold a full model replica; gradients
+// are synchronized via weight-grad AllReduce after the backward pass.
+//
+// Loop structure per pass:
+//   Forward_Pass  (layer 0 → SIZE-1): wait for any prior wg comm to finish,
+//                 simulate compute, then advance to next layer.
+//   Weight_Gradient (layer SIZE-1 → 0): simulate wg compute, issue wg comm
+//                 (Non_Blocking — overlaps with input-grad compute of next
+//                 layer), then move to Input_Gradient (or restart if at layer 0).
+//   Input_Gradient (same layer as Weight_Gradient): simulate ig compute,
+//                 decrement layer index, loop back to Weight_Gradient.
+//
+// The 'delay_loaded' flag prevents reloading the compute delay on re-entry
+// after a Workload_Wait event.
 void Workload::iterate_data_parallel() {
 
   if (generator->id == 0)
@@ -296,9 +356,11 @@ void Workload::iterate_data_parallel() {
   assert(index < SIZE);
   check_for_sim_end();
   if (current_state == LoopState::Forward_Pass) {
+    // Block until the previous pass's wg comm for this layer is done.
     if (!layers[index]->is_weight_grad_comm_finished_blocking()) {
       return;
     }
+    // Load compute delay once, then wait for it to expire.
     if (delay_loaded == false) {
       counter = layers[index]->get_fwd_pass_compute();
       delay_loaded = true;
@@ -311,6 +373,7 @@ void Workload::iterate_data_parallel() {
     index++;
     delay_loaded = false;
     if (index >= SIZE) {
+      // Reached the last layer; switch to backward pass.
       current_state = LoopState::Weight_Gradient;
       index--;
     }
@@ -327,9 +390,11 @@ void Workload::iterate_data_parallel() {
       return;
     }
     delay_loaded = false;
+    // Issue AllReduce for weight gradients (non-blocking: overlaps with ig).
     layers[index]->issue_weight_grad_comm(
         SchedulingPolicy::None, CollectiveBarrier::Non_Blocking);
     if (index == 0) {
+      // Completed all layers in the backward pass — one full pass done.
       if (generator->id == 0) {
         std::cout << "pass: " << pass_counter
                   << " finished at time: " << Sys::boostedTick() << std::endl;
@@ -358,6 +423,11 @@ void Workload::iterate_data_parallel() {
     return;
   }
 }
+// Hybrid-customized parallelism: each layer in the workload file specifies
+// its own parallelism strategy, allowing mixed fwd/ig/wg collective types
+// within a single model.  The iteration order mirrors the Transformer hybrid
+// policy (fwd → ig → wg interleaved backward), but dimension assignments
+// are per-layer rather than global.
 void Workload::iterate_hybrid_parallel_customized() {
 
   if (generator->id == 0)
@@ -456,6 +526,10 @@ void Workload::iterate_hybrid_parallel_customized() {
     return;
   }
 }
+// HybridDataModel: dimension 0 is used for model-parallel (tensor) comm
+// (fwd/ig), while dimensions 1+ handle data-parallel (wg AllReduce).
+// The iteration pattern is identical to HybridCustomized/Transformer:
+// blocking fwd comm → non-blocking wg comm overlapped with ig → repeat.
 void Workload::iterate_hybrid_parallel_data_model() {
 
   if (generator->id == 0)
@@ -555,6 +629,9 @@ void Workload::iterate_hybrid_parallel_data_model() {
   }
 }
 
+// HybridModelData: mirror of HybridDataModel with the dimension assignment
+// swapped — dimension 0 carries data-parallel wg comm, dimensions 1+ carry
+// model-parallel fwd/ig comm.  The scheduling logic is identical.
 void Workload::iterate_hybrid_parallel_model_data() {
 
   if (generator->id == 0)
@@ -654,6 +731,11 @@ void Workload::iterate_hybrid_parallel_model_data() {
   }
 }
 
+// Distributed-inference mode: forward-pass only, no backward phases.
+// Each layer issues a blocking forward-pass collective (e.g., tensor-parallel
+// AllReduce/AllGather), then advances to the next layer.  When the last layer
+// is processed, the index wraps back to 0 and pass_counter is incremented,
+// allowing multiple inference batches to be simulated.
 void Workload::iterate_distributed_inference() {
 
   if (generator->id == 0)
@@ -697,6 +779,11 @@ void Workload::iterate_distributed_inference() {
   }
 }
 
+// Pure model-parallel training: all dimensions participate in fwd/ig comms
+// (tensor parallelism); wg comms are omitted (no data-parallel AllReduce).
+// The backward pass processes layers in reverse: ig compute → ig comm
+// (LIFO, non-blocking) → wg compute → wg comm (blocking on prior ig) →
+// move to next lower layer or restart forward pass if at layer 0.
 void Workload::iterate_model_parallel() {
 
   if (generator->id == 0)
@@ -793,6 +880,16 @@ void Workload::iterate_model_parallel() {
   }
 }
 
+// Transformer hybrid-parallel training (tensor + data parallelism).
+// Forward dimensions (up to model_parallel_boundary) handle tensor-parallel
+// comm (fwd/ig blocking), while outer dimensions handle data-parallel wg
+// AllReduce (FIFO, non-blocking — overlaps with ig of the next layer).
+//
+// Pass structure:
+//   Forward_Pass: fwd compute → blocking fwd comm → advance layer
+//   Input_Gradient: ig compute → blocking ig comm → switch to Weight_Gradient
+//   Weight_Gradient: wg compute → non-blocking wg comm → wait for prior ig
+//                    comm → move to next layer or restart
 void Workload::iterate_hybrid_parallel_Transformer() {
 
   if (generator->id == 0)
@@ -893,6 +990,18 @@ void Workload::iterate_hybrid_parallel_Transformer() {
   }
 }
 
+// Transformer hybrid-parallel with gradient checkpointing ("forward-in-backward").
+// Identical to iterate_hybrid_parallel_Transformer except that certain layers
+// are marked as checkpoints: when the backward pass reaches a layer whose
+// 'needs_fwd_in_bckwd_initiation' flag is set, the state machine switches to
+// Forward_In_BackPass, re-executes forward computation from the preceding
+// checkpoint layer up to the current one, then resumes the backward pass.
+// This trades re-computation for reduced activation memory.
+//
+// Additional state: Forward_In_BackPass — re-runs fwd compute and comm for
+// checkpoint layers; 'checkpoint_initiated' prevents double-initiation.
+// fwd_pass_comm_size is clamped to 4 KB minimum to avoid degenerate small
+// messages on the network.
 void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
 
   if (generator->id == 0)
@@ -979,6 +1088,8 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
     generator->register_event(this, EventType::General, NULL, 1);
     return;
   } else if (current_state == LoopState::Input_Gradient) {
+    // If this layer triggers a checkpoint re-computation, scan backward to
+    // find the nearest checkpoint layer and switch to Forward_In_BackPass.
     if (layers[index]->needs_fwd_in_bckwd_initiation && !checkpoint_initiated) {
       int tmp = index;
       while (!layers[index--]->is_checkpoint)
@@ -1045,6 +1156,20 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
   }
 }
 
+// DLRM / DLRMEnhanced hybrid-parallel training.
+// DLRM has a distinct "bottom" MLP + embedding layers followed by "top" MLP
+// layers.  The bottom embedding layers (indices 0..DLRM_LAST_BOTTOM_LAYER)
+// use All-to-All for forward communication (embedding look-up redistribution),
+// while all layers use Non-Blocking wg AllReduce.
+//
+// Key scheduling difference from Transformer:
+//   - Bottom-layer fwd All-to-All is issued non-blocking on first encounter.
+//   - The top section (layer DLRM_LAST_BOTTOM_LAYER+1) stalls in the fwd
+//     pass until layer 0's All-to-All has completed.
+//   - During input-gradient, layer DLRM_LAST_BOTTOM_LAYER+1 kicks off
+//     layer 0's ig All-to-All (non-blocking, HIGHEST priority).
+//   - Under DLRMEnhanced policy, the blocking-on-ig-comm check is skipped,
+//     allowing further overlap.
 void Workload::iterate_hybrid_parallel_DLRM() {
 
   if (generator->id == 0)
@@ -1148,6 +1273,10 @@ void Workload::iterate_hybrid_parallel_DLRM() {
     generator->register_event(this, EventType::General, NULL, 1);
   }
 }
+// Reads and returns the number of layers declared in a workload file.
+// Opens the file under the "workload_inputs/" prefix, skips the header
+// line, and reads the integer on the second line.  Used externally to
+// pre-size data structures before constructing the full Workload object.
 int Workload::get_layer_numbers(std::string workload_input) {
   std::ifstream inFile;
   inFile.open("workload_inputs/" + workload_input);
@@ -1167,6 +1296,10 @@ int Workload::get_layer_numbers(std::string workload_input) {
   return layers;
 }
 
+// Converts a parallelism strategy string (as it appears in the workload file
+// header) to the corresponding ParallelismPolicy enum value.
+// Returns ParallelismPolicy::None if the string is unrecognized, which will
+// cause initialize_workload() to abort (except under PHY_MTP builds).
 ParallelismPolicy Workload::decode_parallelsim(std::string parallelism) {
 
   if (generator->id == 0)
@@ -1198,6 +1331,20 @@ ParallelismPolicy Workload::decode_parallelsim(std::string parallelism) {
     return ParallelismPolicy::None;
 }
 
+// Maps a parallelism policy to per-phase dimension masks.
+// Returns a map with keys "fwd", "ig", "wg"; each value is a 10-element
+// boolean vector indicating which logical network dimensions participate in
+// that phase's collective.
+//
+// Rules:
+//   Data / DLRM / MicroBenchmark: only wg uses all dims (data-parallel only).
+//   Model / DistributedInference: fwd and ig use all dims (tensor-parallel).
+//   HybridModelData: dim 0 = data (wg), dims 1-9 = model (fwd/ig).
+//   HybridDataModel: dim 0 = model (fwd/ig), dims 1-9 = data (wg).
+//   Transformer / TransformerFwdInBckwd: dims 0..model_parallel_boundary
+//       are model-parallel (fwd/ig); remaining dims are data-parallel (wg).
+//       The boundary is derived from model_parallel_npu_group via
+//       generator->break_dimension().
 std::map<std::string, std::vector<bool>> Workload::decode_involved_dimensions(
     ParallelismPolicy policy,
     int model_parallel_npu_group) {
@@ -1261,6 +1408,29 @@ std::map<std::string, std::vector<bool>> Workload::decode_involved_dimensions(
   return result;
 }
 
+// Parses the workload description file and populates the layers[] array.
+//
+// File format (text):
+//   Line 1: <PARALLELISM_STRATEGY> [key: value ...]
+//           e.g. "HYBRID_TRANSFORMER model_parallel_NPU_group: 8 pp: 2 ..."
+//   Line 2: <number_of_layers>
+//   Lines 3+: one layer per line with fields:
+//     id  dependency  fp_compute  fp_comm_type  fp_comm_size
+//                     ig_compute  ig_comm_type  ig_comm_size
+//                     wg_compute  wg_comm_type  wg_comm_size  wg_update_time
+//     [specific_parallelism]  (only for HybridCustomized policy)
+//
+// Communication type strings encode both the collective type (e.g. ALLREDUCE,
+// ALLTOALL, ALLGATHER, REDUCESCATTER, BROADCAST) and the process group
+// (DP, EP, DP_EP suffix, or none for the default group).
+//
+// Compute times are scaled by generator->compute_scale; comm sizes are scaled
+// by generator->comm_scale, allowing global slow-down/speed-up factors.
+//
+// Checkpoint and checkpoint-initiation layers (used in TransformerFwdInBckwd)
+// are read from the header line and applied to the corresponding Layer objects.
+//
+// Returns true on success; calls exit(1) on file-open or parse errors.
 bool Workload::initialize_workload(std::string name) {
   std::map<int, bool> chekpoints;
   std::map<int, bool> need_checkpoint_initiation;
@@ -1290,8 +1460,8 @@ bool Workload::initialize_workload(std::string name) {
   
   while (iss >> token) {
       tokens.push_back(token);
-      if (generator->id == 0)
-        std::cout << "Token is : '" << token << "'" << std::endl;
+      // if (generator->id == 0)
+      //   std::cout << "Token is : '" << token << "'" << std::endl;
   }
 
   if(!tokens.empty()){
@@ -1441,20 +1611,26 @@ bool Workload::initialize_workload(std::string name) {
 
     if (generator->id == 0) {
       std::cout << "\nRead workload info from file line " << i << ":\n" <<
-        "\tid: " << id << "\n" <<
-        "\tdepen: " << depen << "\n" <<
-        "\tfp_compute_time: " << fp_compute_time << "\n" <<
-        "\tfp_comm_type_s: " << fp_comm_type_s << "\n" <<
-        "\tfp_comm_size: " << fp_comm_size << "\n" <<
-        "\tig_compute_time: " << ig_compute_time << "\n" <<
-        "\tg_comm_type_s: " << ig_comm_type_s << "\n" <<
-        "\tig_comm_size: " << ig_comm_size << "\n" <<
-        "\twg_compute_time: " << wg_compute_time << "\n" <<
-        "\twg_comm_type_s: " << wg_comm_type_s << "\n" <<
-        "\twg_comm_size: " << wg_comm_size << "\n" <<
-        "\twg_update_time: " << wg_update_time << "\n";
+        "\t id: " << id << "\n" <<
+        "\t depen: " << depen << "\n" <<
+        "\t fp_compute_time: " << fp_compute_time << "\n" <<
+        "\t fp_comm_type_s: " << fp_comm_type_s << "\n" <<
+        "\t fp_comm_size: " << fp_comm_size << "\n" <<
+        "\t ig_compute_time: " << ig_compute_time << "\n" <<
+        "\t g_comm_type_s: " << ig_comm_type_s << "\n" <<
+        "\t ig_comm_size: " << ig_comm_size << "\n" <<
+        "\t wg_compute_time: " << wg_compute_time << "\n" <<
+        "\t wg_comm_type_s: " << wg_comm_type_s << "\n" <<
+        "\t wg_comm_size: " << wg_comm_size << "\n" <<
+        "\t wg_update_time: " << wg_update_time << "\n" << 
+        "-------------------------\n" << std::endl;
     }
 
+    // Decode collective type and process-group from the string fields read
+    // from the workload file.  Each phase (wg, ig, fp) is decoded independently.
+    // The prefix determines ComType; an optional suffix (_EP, _DP_EP) selects
+    // the MockNccl group (EP = expert-parallel, DP_EP = data+expert-parallel,
+    // no suffix = default data/tensor-parallel group for that phase).
     ParallelismPolicy specific_policy = ParallelismPolicy::None;
     std::map<std::string, std::vector<bool>> selected_involved_dimensions;
     ComType fp_type = ComType::None;
@@ -1671,11 +1847,6 @@ bool Workload::initialize_workload(std::string name) {
         fp_group_type = MockNccl::GroupType::NONE;
       }
     }
-
-    if (generator->id == 0) {
-      std::cout << "id: " << id << " , depen: " << depen
-                << " , wg_comp_time: " << wg_compute_time << std::endl;
-    }
     
     if (parallelismPolicy == ParallelismPolicy::HybridCustomized) {
       std::string specific_parallelsim;
@@ -1733,6 +1904,8 @@ bool Workload::initialize_workload(std::string name) {
   inFile.close();
   return true;
 }
+// Convenience wrapper used by the scheduler to kick off a workload event.
+// Equivalent to calling call() directly with a General event.
 void Workload::fire() {
   call(EventType::General, NULL);
 }
