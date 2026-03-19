@@ -96,11 +96,6 @@ RingBroadcast::RingBroadcast(
     }
   }
 
-  if (id == 0) {
-    std::cout << "AS_RING_BCAST_CHUNKS: " << AS_RING_BCAST_CHUNKS
-              << std::endl;
-  }
-
   this->num_chunks = static_cast<int>(AS_RING_BCAST_CHUNKS);
   if (this->num_chunks <= 0) {
     this->num_chunks = 1;
@@ -138,6 +133,22 @@ RingBroadcast::RingBroadcast(
   // Kept for compatibility/debug prints. Actual send/recv size is computed
   // per chunk via chunk_size_bytes().
   this->msg_size = this->base_chunk_size;
+
+  std::cout << "RingBroadcast being initialized:" << std::endl <<
+      "\t type: " << comtype_to_string(type) << std::endl <<
+      "\t id: " << id << std::endl <<
+      "\t layer num: " << layer_num << std::endl <<
+      "\t data_size: " << data_size << std::endl <<
+      "\t AS_RING_BCAST_CHUNKS: " << AS_RING_BCAST_CHUNKS << std::endl <<
+      "\t msg_size: " << msg_size << std::endl <<
+      "\t direction: " << RingTopology::direction_to_string(direction) << std::endl <<
+      "\t injection_policy: " << injection_policy_to_string(injection_policy) << std::endl << 
+      "\t boost_mode: " << boost_mode << std::endl << 
+      "\t root: " << this->root << std::endl << 
+      "\t nodes_in_ring: " << this->nodes_in_ring << std::endl << 
+      "\t current_sender: " << this->current_sender << std::endl << 
+      "\t current_receiver: " << this->current_receiver << std::endl <<
+      "---------------------------\n" << std::endl;
 
   // Pipeline progress counters:
   //   chunks_staged:   how many chunks root has pushed into the packet queue.

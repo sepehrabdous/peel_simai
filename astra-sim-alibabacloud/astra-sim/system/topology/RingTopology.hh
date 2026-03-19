@@ -25,6 +25,14 @@ namespace AstraSim {
 class RingTopology : public BasicLogicalTopology {
  public:
   enum class Direction { Clockwise, Anticlockwise };
+  static constexpr std::string_view direction_to_string(Direction dir) {
+    switch (dir) {
+        case Direction::Clockwise: return "Clockwise";
+        case Direction::Anticlockwise: return "Anticlockwise";
+    }
+    return "Unknown Direction";
+  }
+
   enum class Dimension { Local, Vertical, Horizontal, NA };
   std::string name;
   int id;

@@ -21,7 +21,15 @@ StreamBaseline::StreamBaseline(
   this->priority = priority;
   steps_finished = 0;
   initial_data_size = phases_to_go.front().initial_data_size;
+
+  std::cout << "Creatinga new StreamBaseline:" << std::endl <<
+      "\t stream_num: " << stream_num << std::endl <<
+      "\t # phases_to_go: " << phases_to_go.size() << std::endl <<
+      "\t priority: " << priority << std::endl << 
+      "\t initial_data_size: " << initial_data_size << std::endl;
+
 }
+
 void StreamBaseline::init() {
   initialized = true;
   last_init = Sys::boostedTick();

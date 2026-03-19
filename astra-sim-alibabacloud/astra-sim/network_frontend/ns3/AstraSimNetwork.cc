@@ -477,9 +477,8 @@ int main(int argc, char *argv[]) {
   // Inject the first workload event for each GPU into the NS3 scheduler.
   // Subsequent events are self-scheduled by AstraSim via sim_schedule().
   for (int i = 0; i < gpu_num; i++) {
-    std::cout << "\n---------------------------" << std::endl <<
-      "Firing the workload for gpu: " << i << std::endl <<
-      "---------------------------\n" << std::endl;
+    std::cout << "\nFiring the workload for gpu: " << i << std::endl <<
+      "---------------------------" << std::endl;
     systems[i]->workload->fire();
   }
 

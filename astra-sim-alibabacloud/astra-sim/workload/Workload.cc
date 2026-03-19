@@ -129,13 +129,16 @@ void Workload::initialize_stat_files() {
 // delegates to the parallelism-specific iterator.
 void Workload::call(EventType event, CallData* data) {
 
-  if (generator->id == 0) {
-      std::cout << "counter: " << counter << std::endl;
-  }
-
+  std::cout << "Workload::call called:" << std::endl <<
+    "\t id: " << generator->id << std::endl <<
+    "\t event type: " << event_to_string(event) << std::endl << 
+    "\t counter: " << counter << std::endl <<
+    "-----------------------\n" << std::endl;
+    
   // If there is outstanding compute time, re-register and yield.
   // The scheduler will call us again after 'counter' ticks.
   if (counter > 0) {
+    std::cout << "Counter > 0 ... waiting!" << std::endl;
     generator->try_register_event(
         this, EventType::Workload_Wait, NULL, counter);
     return;
@@ -1006,7 +1009,7 @@ void Workload::iterate_hybrid_parallel_Transformer_fwd_in_bckwd() {
 
   if (generator->id == 0)
     std::cout << "iterate_hybrid_parallel_Transformer_fwd_in_bckwd called!" << std::endl << 
-       "\t current_state: " << static_cast<int>(current_state)  << std::endl << 
+       "\t current_state: " << loopstate_to_string(current_state) << std::endl << 
        "\t delay_loaded: " << delay_loaded  << std::endl << 
        "\t counter: " << counter  << std::endl << 
        "\t collective_issued: " << collective_issued << std::endl;

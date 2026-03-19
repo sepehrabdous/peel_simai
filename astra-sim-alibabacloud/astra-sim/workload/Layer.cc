@@ -22,6 +22,16 @@ using namespace ns3;
 
 
 namespace AstraSim {
+// Layer represents one neural network layer in the distributed training
+// simulation. Each layer has three communication phases that may involve
+// collective operations across NPUs:
+//   - Forward pass (fwd):        typically TP all-gather / all-to-all
+//   - Input gradient (ig):       backward TP communication (e.g. reduce-scatter)
+//   - Weight gradient (wg):      DP all-reduce / reduce-scatter for parameter sync
+//
+// Each phase has an associated compute time, collective type, parallelism group
+// (TP/DP/EP/DP_EP), message size, and a bitmask of which network dimensions
+// participate in the collective.
 Layer::Layer(
     std::string id,
     int layer_num,
@@ -67,10 +77,14 @@ Layer::Layer(
       weight_grad_comm_involved_dimensions;
   this->collective_counter = 0;
 
+  // weight_grad_update_time is reused as the post-collective delay for all
+  // three phases (models parameter-update or memory-copy overhead after comm).
   this->weight_grad_update_time = weight_grad_update_time;
   this->fwd_update_time = weight_grad_update_time;
   this->input_grad_update_time = weight_grad_update_time;
 
+  // Accumulators for per-layer simulation statistics (in ticks, converted to
+  // ns via /FREQ when reported).
   this->total_forward_pass_compute = 0;
   this->total_input_grad_compute = 0;
   this->total_weight_grad_compute = 0;
@@ -89,7 +103,25 @@ Layer::Layer(
   assert(generator != NULL);
 }
 
+// call() is the event callback used by the simulation event system.
+// Collective completion follows a two-phase pattern:
+//   Phase 1 (*_Comm_Finished):           network signals the collective is done;
+//                                        record the finish time and schedule
+//                                        Phase 2 after the update delay.
+//   Phase 2 (*_Comm_Finished_After_Delay): apply the update delay to finish_tick,
+//                                         accumulate stats, clean up the dataset,
+//                                         and notify the workload to advance.
+//
+// The waiting-time accounting has two cases:
+//   - Blocking (single outstanding dataset): the workload was stalled waiting
+//     for this collective, so waiting time = full collective duration.
+//   - Non-blocking (workload explicitly called is_*_finished_blocking()):
+//     the workload recorded when it started waiting via started_waiting_for_*;
+//     waiting time = finish_tick minus that recorded start tick.
+//   - Neither (no one was waiting): the collective ran fully overlapped;
+//     no waiting time is charged.
 void Layer::call(EventType event, CallData* mdata) {
+  // Phase 1: record the raw completion tick and reschedule after the update delay.
   if (event == EventType::Wight_Grad_Comm_Finished) {
     last_wg_finished = Sys::boostedTick();
     generator->register_event(
@@ -112,6 +144,8 @@ void Layer::call(EventType event, CallData* mdata) {
         this, EventType::Fwd_Comm_Finished_After_Delay, mdata, fwd_update_time);
     return;
   }
+  // Phase 2: the update delay has elapsed; finalize statistics.
+  // IntData carries the dataset ID so we can look it up in the map.
   int data = ((IntData*)mdata)->data;
   IntData* intData = ((IntData*)mdata);
   if (event == EventType::Wight_Grad_Comm_Finished_After_Delay) {
@@ -120,12 +154,14 @@ void Layer::call(EventType event, CallData* mdata) {
       std::cout << "***** info: weight gradient collective for layer: " << id
                 << " is finished************" << std::endl;
     }
+    // Shift the effective finish tick by the update delay before computing duration.
     weight_grad_datasets[data]->finish_tick += weight_grad_update_time;
     total_weight_grad_comm += weight_grad_datasets[data]->finish_tick -
         weight_grad_datasets[data]->creation_tick;
 
     if (weight_grad_datasets.size() == 1 &&
-        wg_barrier == CollectiveBarrier::Blocking) { 
+        wg_barrier == CollectiveBarrier::Blocking) {
+      // Blocking barrier: workload stalled since collective creation; charge full duration.
       total_waiting_for_wg_comm += weight_grad_datasets[data]->finish_tick -
           weight_grad_datasets[data]->creation_tick;
       update_stream_stats(weight_grad_datasets[data]);
@@ -136,7 +172,9 @@ void Layer::call(EventType event, CallData* mdata) {
       generator->increase_finished_streams(dataset_streams);
       delete intData;
       return;
-    } else if (started_waiting_for_weight_grad.size() > 0) {  
+    } else if (started_waiting_for_weight_grad.size() > 0) {
+      // Workload polled and found comm still in progress; charge only the time
+      // from when the workload started waiting, not from collective creation.
       total_waiting_for_wg_comm += weight_grad_datasets[data]->finish_tick -
           started_waiting_for_weight_grad.front();
       started_waiting_for_weight_grad.pop_front();
@@ -149,6 +187,7 @@ void Layer::call(EventType event, CallData* mdata) {
       delete intData;
       return;
     }
+    // Collective finished before the workload needed it; no exposed wait time.
     update_stream_stats(weight_grad_datasets[data]);
     int dataset_streams = weight_grad_datasets[data]->total_streams;
     delete weight_grad_datasets[data];
@@ -156,6 +195,7 @@ void Layer::call(EventType event, CallData* mdata) {
     generator->increase_finished_streams(dataset_streams);
     delete intData;
     #else
+    // PHY_MTP path: physical multi-tenant; simpler bookkeeping.
     workload->call(EventType::General, NULL);
     generator->increase_finished_streams(1);
     #endif
@@ -253,6 +293,7 @@ void Layer::call(EventType event, CallData* mdata) {
   }
 }
 
+// Return the compute time for this phase and accumulate it for statistics.
 Tick Layer::get_fwd_pass_compute() {
   total_forward_pass_compute += fwd_pass_compute_time;
   return fwd_pass_compute_time;
@@ -265,6 +306,8 @@ Tick Layer::get_weight_grad_compute() {
   total_weight_grad_compute += weight_grad_compute_time;
   return weight_grad_compute_time;
 }
+// Legacy tick-based waiting counters (incremented by the workload scheduler
+// when it finds the collective still pending during a busy-wait poll).
 void Layer::increment_waiting_for_wg() {
   total_waiting_for_wg_comm++;
 }
@@ -274,13 +317,16 @@ void Layer::increment_waiting_for_ig() {
 void Layer::increment_waiting_for_fwd() {
   total_waiting_for_fwd_comm++;
 }
+// Non-blocking check: returns true only if all outstanding datasets are done.
 bool Layer::is_fwd_pass_comm_finished() {
-  if (fwd_pass_datasets.size() ==
-      0) { 
+  if (fwd_pass_datasets.size() == 0) {
     return true;
   }
   return false;
 }
+// Blocking check: if still in progress, record the tick when the workload
+// started stalling so call() can charge exposed wait time accurately.
+// The push_back guard ensures we only record the first poll per collective.
 bool Layer::is_fwd_pass_comm_finished_blocking() {
   if (fwd_pass_datasets.size() == 0) {
     return true;
@@ -290,16 +336,16 @@ bool Layer::is_fwd_pass_comm_finished_blocking() {
   }
   return false;
 }
+// Non-blocking check for input gradient collective.
 bool Layer::is_input_grad_comm_finished() {
-  if (input_grad_datasets.size() ==
-      0) { 
+  if (input_grad_datasets.size() == 0) {
     return true;
   }
   return false;
 }
+// Blocking check for input gradient collective.
 bool Layer::is_input_grad_comm_finished_blocking() {
-  if (input_grad_datasets.size() ==
-      0) { 
+  if (input_grad_datasets.size() == 0) {
     return true;
   }
   if (started_waiting_for_input_grad.size() == 0) {
@@ -307,13 +353,14 @@ bool Layer::is_input_grad_comm_finished_blocking() {
   }
   return false;
 }
+// Non-blocking check for weight gradient collective.
 bool Layer::is_weight_grad_comm_finished() {
-  if (weight_grad_datasets.size() ==
-      0) { 
+  if (weight_grad_datasets.size() == 0) {
     return true;
   }
   return false;
 }
+// Blocking check for weight gradient collective.
 bool Layer::is_weight_grad_comm_finished_blocking() {
   if (weight_grad_datasets.size() == 0) {
     return true;
@@ -323,6 +370,8 @@ bool Layer::is_weight_grad_comm_finished_blocking() {
   }
   return false;
 }
+// Debug helper: prints which network dimensions participate in a collective
+// (1 = involved, 0 = skipped). Used after issuing a collective for tracing.
 void Layer::print_involved_dimensions(std::vector<bool>& involved_dimensions) {
   std::cout << " involved dimensions: ";
   for (int i = 0; i < involved_dimensions.size(); i++) {
@@ -334,6 +383,22 @@ void Layer::print_involved_dimensions(std::vector<bool>& involved_dimensions) {
   }
   std::cout << std::endl;
 }
+// report() overload 1: used in simulation mode (non-analytical).
+// Computes per-layer statistics and writes a row to the EndToEnd CSV.
+// On the last layer it also writes the workload-level summary row with
+// pipeline bubble time and a breakdown of exposed communication time by
+// parallelism type (DP, DP_EP, TP, EP, PP).
+//
+// Parameters:
+//   run_name      - identifier string for this simulation run
+//   layer_num     - index of this layer (0-based) in the workload
+//   stat_row      - row index within the current stat block (for multi-GPU
+//                   stat aggregation; 0 means this rank writes the layer name)
+//   total_compute - accumulated total compute time across all layers (ns), updated in-place
+//   total_exposed - accumulated exposed comm time across all layers (ns), updated in-place
+//   total_fwd/wg/ig_time - per-phase time vectors [0]=compute [1]=exposed [2]=total comm
+//   pre_bubble_time - accumulated non-bubble time used to derive PP bubble
+//   DP/DP_EP/TP/EP_comm - exposed communication time by parallelism group (ns)
 LayerData Layer::report(
     std::string run_name,
     int layer_num,
@@ -354,14 +419,18 @@ LayerData Layer::report(
     double& Expose_EP_comm) {
   LayerData layerData;
   take_stream_stats_average();
+  // Derive parallelism sizes from workload configuration.
   int TP_size = workload->model_parallel_npu_group;
   int PP_size = workload->pipeline_model_parallelism;
   int DP_size = workload->all_gpus / (TP_size * PP_size);
   int EP_size = workload->expert_parallel_npu_group;
-  int vpp = workload->vpp;
+  int vpp = workload->vpp;           // virtual pipeline parallelism degree
   uint32_t pp_commsize = workload->pp_commsize;
-  int GA = workload->GA;
+  int GA = workload->GA;             // gradient accumulation steps
   UserParam* param = UserParam::getInstance();
+  // Group size for each phase depends on which parallelism group owns it.
+  // Input/fwd grad: EP group uses EP_size, otherwise TP_size.
+  // Weight grad: DP_EP means DP ranks are split by EP, so effective size = DP/EP.
   int input_grad_group_size =
       input_grad_group_type == MockNccl::GroupType::EP ? EP_size : TP_size;
   int fwd_pass_group_size =
@@ -369,15 +438,19 @@ LayerData Layer::report(
   int weight_grad_group_size =
       weight_grad_group_type == MockNccl::GroupType::DP_EP ? DP_size / EP_size
                                                            : DP_size;
+  // Accumulate pre-bubble time (total useful work excluding embedding layer,
+  // which is typically handled outside the main PP schedule).
   if (id != "embedding_layer"){
       pre_bubble_time += ((total_waiting_for_fwd_comm + total_forward_pass_compute + total_weight_grad_compute + total_input_grad_compute + total_waiting_for_ig_comm) / FREQ);
     }
+  // Classify exposed weight-gradient comm into DP or DP_EP buckets.
   if(weight_grad_group_type == MockNccl::GroupType::DP_EP){
     DP_EP_comm += (total_waiting_for_wg_comm / FREQ);
   }
   else{
     DP_comm += (total_waiting_for_wg_comm / FREQ);
   }
+  // Classify exposed forward/input-gradient comm into EP or TP buckets.
   if(fwd_pass_group_type == MockNccl::GroupType::EP){
     Expose_EP_comm += ((total_waiting_for_fwd_comm + total_waiting_for_ig_comm) / FREQ);
   }
@@ -501,9 +574,12 @@ LayerData Layer::report(
       data = "total exposed comm," + to_string(total_exposed) + ",total comp," + to_string(total_compute) + ",total time," + to_string(total_time);
       EndToEnd->write_line(data);
 
+      // PP exposed comm: 2 sends per micro-batch (fwd and bwd activation),
+      // scaled by vpp and GA, with overlap ratio applied.
       Tick Expose_PP_time = (2 * vpp * GA * (pp_commsize * GBps / (param->net_work_param.pp_overlap_ratio) * 1e9) / FREQ );
       Expose_PP_time *= (1-param->net_work_param.pp_overlap_ratio) ;
-      //pp bubble time
+      // PP bubble: proportion of pipeline fill/drain cost = (PP-1)/(GA*vpp)
+      // times the single-stage compute time captured in pre_bubble_time.
       pre_bubble_time *= static_cast<double>(PP_size - 1) / (GA * vpp);
       auto format_value = [](double value) {
         std::ostringstream stream;
@@ -537,14 +613,23 @@ LayerData Layer::report(
   }
   return layerData;
 }
+// Extract the filename component from a filesystem path
+// (everything after the last '/').
 std::string getFileName(const std::string& path) {
-    size_t pos = path.find_last_of("/"); 
+    size_t pos = path.find_last_of("/");
     if (pos != std::string::npos) {
-
         return path.substr(pos + 1, path.length() - pos - 1);
     }
-    return path; 
+    return path;  // no slash found; the whole string is already the filename
 }
+// report() overload 2: supports both simulation and ANALYTICAL modes.
+// In ANALYTICAL mode, communication times are computed directly from the
+// bandwidth model (compute_time()) rather than measured from the simulation.
+// Overlap ratios are applied here to convert raw comm time into the exposed
+// (non-overlapped) portion before accumulating global counters.
+//
+// This overload also generates an HTML pie chart (chart.html) when the
+// visual flag is set, showing the time breakdown for the workload.
 LayerData Layer::report(
     std::string run_name,
     int layer_num,
@@ -566,6 +651,7 @@ LayerData Layer::report(
   int PP_size = workload->pipeline_model_parallelism;
   int vpp = workload->vpp;
   uint32_t pp_commsize = workload->pp_commsize;
+  // DP_size: number of data-parallel replicas = total GPUs / (TP * PP)
   int DP_size = generator->all_gpus[0] / (TP_size * PP_size);
   int GA = workload->GA;
   int EP_size = workload->expert_parallel_npu_group;
@@ -573,6 +659,7 @@ LayerData Layer::report(
   int weight_grad_group_size ;
   int input_grad_group_size ;
   UserParam* param = UserParam::getInstance();
+  // Determine effective group sizes for bus-bandwidth calculation.
   input_grad_group_size =
         input_grad_group_type == MockNccl::GroupType::EP ? EP_size : TP_size;
     fwd_pass_group_size =
@@ -581,19 +668,21 @@ LayerData Layer::report(
         weight_grad_group_type == MockNccl::GroupType::DP_EP ? DP_size / EP_size
                                                              : DP_size;
   if(param->mode == ModeType::ANALYTICAL){
-    
+    // In analytical mode no simulation events are fired, so we compute
+    // collective durations here using the bandwidth model.
     total_fwd_comm = compute_time(fwd_pass_comm_type,TP_size,fwd_pass_group_size,fwd_pass_comm_size,fwd_pass_group_type,generator->all_gpus[0],EP_size);
     total_weight_grad_comm = compute_time(weight_grad_comm_type,TP_size,weight_grad_group_size,weight_grad_comm_size,weight_grad_group_type,generator->all_gpus[0],EP_size);
     total_input_grad_comm = compute_time(input_grad_comm_type,TP_size,input_grad_group_size,input_grad_comm_size,input_grad_group_type,generator->all_gpus[0],EP_size);
+    // In analytical mode assume no overlap: all comm is fully exposed.
     total_waiting_for_fwd_comm = total_fwd_comm; //tp forward
     total_waiting_for_ig_comm = total_input_grad_comm;  //tp backward
     total_waiting_for_wg_comm = total_weight_grad_comm;
-    
-
   }
   if (id != "embedding_layer"){
       pre_bubble_time += ((total_waiting_for_fwd_comm + total_forward_pass_compute + total_weight_grad_compute + total_input_grad_compute + total_waiting_for_ig_comm) / FREQ);
     }
+  // Apply overlap ratios to compute the exposed (non-overlapped) comm fraction.
+  // dp_overlap_ratio: fraction of DP comm that is hidden behind compute.
   if(weight_grad_group_type == MockNccl::GroupType::DP_EP){
     total_waiting_for_wg_comm *= (1-param->net_work_param.dp_overlap_ratio);
     DP_EP_comm += (total_waiting_for_wg_comm / FREQ);
@@ -602,6 +691,7 @@ LayerData Layer::report(
     total_waiting_for_wg_comm *= (1-param->net_work_param.dp_overlap_ratio);
     DP_comm += (total_waiting_for_wg_comm / FREQ);
   }
+  // ep_overlap_ratio / tp_overlap_ratio: fraction of EP/TP comm hidden behind compute.
   if(fwd_pass_group_type == MockNccl::GroupType::EP){
     total_waiting_for_fwd_comm *= (1-param->net_work_param.ep_overlap_ratio);
     total_waiting_for_ig_comm *= (1-param->net_work_param.ep_overlap_ratio);
@@ -730,12 +820,15 @@ LayerData Layer::report(
         if (param->mode != ModeType::ANALYTICAL) {
             total_exposed = (((double)Sys::boostedTick()) / FREQ ) - total_compute;
         }
-        //pp commtime
+        // PP pipeline comm: 2 point-to-point sends per micro-batch per stage
+        // (one send forward, one send backward for activations/gradients),
+        // scaled by virtual pipeline stages (vpp) and gradient accumulation (GA).
         Tick Expose_PP_time = (2 * vpp * GA * (pp_commsize * GBps / (param->net_work_param.pp_overlap_ratio) * 1e9) / FREQ );
         Expose_PP_time *= (1-param->net_work_param.pp_overlap_ratio) ;
-        //pp bubble time
+        // PP bubble: the pipeline fill/drain inefficiency = (PP-1) * stage_time / (GA * vpp).
+        // pre_bubble_time holds sum of per-stage work time; scale it to get the bubble.
         pre_bubble_time *= static_cast<double>(PP_size - 1) / (GA * vpp);
-        //total time
+        // Total wall-clock time = compute + exposed comm + pipeline bubble + PP comm.
         double total_time = total_compute + total_exposed + pre_bubble_time + Expose_PP_time;
         auto format_percentage = [&](double value) {
         double percentage = (value / total_time) * 100;
@@ -853,6 +946,12 @@ LayerData Layer::report(
 
   return layerData;
 }
+// Binary search that returns the pair of bracketing indices for target in a
+// sorted array. Used by bandwidth look-up tables (ratio data) to interpolate
+// between the nearest measured data points.
+//   .first  = largest index where arr[i] <= target  (-1 if none)
+//   .second = smallest index where arr[i] >= target (-1 if none)
+// When target is an exact match, both indices are equal.
 static std::pair<int, int> binarySearch(const std::vector<long>& arr, long target) {
     int low = 0;
     int high = arr.size() - 1;
@@ -863,12 +962,12 @@ static std::pair<int, int> binarySearch(const std::vector<long>& arr, long targe
 
         if (arr[mid] < target) {
             low = mid + 1;
-            leftIndex = mid; 
+            leftIndex = mid;   // best lower bound so far
         } else if (arr[mid] > target) {
             high = mid - 1;
-            rightIndex = mid; 
+            rightIndex = mid;  // best upper bound so far
         } else {
-            leftIndex = mid; 
+            leftIndex = mid;   // exact match
             rightIndex = mid;
             break;
         }
@@ -876,6 +975,8 @@ static std::pair<int, int> binarySearch(const std::vector<long>& arr, long targe
     return std::make_pair(leftIndex, rightIndex);
 }
 
+// Map a ComType enum to the string key used by the bandwidth look-up tables
+// (cal_busbw / getValue). The strings must match the table keys exactly.
 char* comtype_to_coll(ComType comtype) {
     switch (comtype) {
         case ComType::None:
@@ -892,12 +993,22 @@ char* comtype_to_coll(ComType comtype) {
             return "all_reduce_all_to_all";
         case ComType::All_Reduce_NVLS:
             return "all_reduce_nvls";
-        case ComType::Broadcast:  // sepehr
+        case ComType::Broadcast:
           return "broadcast";
         default:
             return "unknown";
     }
 }
+// cal_ratio() returns an efficiency correction factor (<= 1.0) that accounts
+// for the gap between the theoretical peak bus bandwidth and the measured
+// effective bandwidth at a given message size and topology.
+//
+// The ratio tables (nic_ratio_data, nvlink_ratio_data, ata_ratio_data) are
+// preloaded look-up tables indexed by (message_size, node_count). For TP
+// collectives the node count is derived from how many nodes the TP group spans;
+// for EP all-to-all it accounts for the TP * EP footprint across nodes.
+// DP and DP_EP groups return 1.0 (no correction applied; their BW is already
+// captured in cal_busbw).
 float Layer::cal_ratio(
     uint64_t data_size,
     int nranks,
@@ -910,27 +1021,29 @@ float Layer::cal_ratio(
     auto nic_ratio_data = generator->nic_ratio_data;
     auto nvlink_ratio_data = generator->nvlink_ratio_data;
     auto ata_ratio_data = generator->ata_ratio_data;
-    // sepehr
-    if ((strcmp(coll_type, "allgather") == 0 || 
-        strcmp(coll_type, "reducescatter") == 0 || 
-        strcmp(coll_type, "broadcast") == 0) && 
+    if ((strcmp(coll_type, "allgather") == 0 ||
+        strcmp(coll_type, "reducescatter") == 0 ||
+        strcmp(coll_type, "broadcast") == 0) &&
         group_type == MockNccl::GroupType::TP){
-        
+        // TP collectives: pick NVLink or NIC ratio table based on bottleneck link.
+        // If TP fits within one server, node count = 1 (intra-server NVLink); otherwise multi-node.
           auto data = is_nvlink ? nvlink_ratio_data : nic_ratio_data;
         int _temp_nnode = (tp_size < gpus_per_server) ? 1 : tp_size / gpus_per_server ;
         return getValue(data_size, _temp_nnode, data);
-    
+
     } else if (strcmp(coll_type, "alltoall") == 0 && group_type == MockNccl::GroupType::EP){
+        // EP all-to-all: effective node count is determined by TP * EP span.
         auto data = ata_ratio_data;
         if(tp_size * nranks <= gpus_per_server){
-            return getValue(data_size, 1, data);
-        }else if(tp_size >= gpus_per_server){    //multi
+            return getValue(data_size, 1, data);  // all within one server
+        }else if(tp_size >= gpus_per_server){    // TP spans multiple nodes: use node_count=9 as proxy for "many nodes"
             return getValue(data_size, 9, data);
         } else {
             int _temp_nnode = (tp_size * nranks) / gpus_per_server;
             return getValue(data_size, _temp_nnode, data);
         }
     } else if (strcmp(coll_type, "alltoall") == 0 && group_type == MockNccl::GroupType::TP){
+        // TP all-to-all (Mixture-of-Experts style): node count based on TP size alone.
         auto data = ata_ratio_data;
         if (tp_size <= gpus_per_server){
             return getValue(data_size, 1, data);
@@ -940,11 +1053,27 @@ float Layer::cal_ratio(
         }
     }
     else if(group_type == MockNccl::GroupType::DP || group_type == MockNccl::GroupType::DP_EP){
-        return 1; 
+        return 1;  // no correction for DP groups; cal_busbw already handles them
     }else{
         return 1;
     }
 }
+// compute_time() analytically estimates the collective communication duration
+// in ticks (nanoseconds) for a given parallelism group and message size.
+//
+// Algorithm:
+//   1. Look up the achievable bus bandwidth (cal_busbw) for the target
+//      topology (intra-server vs inter-server, number of nodes).
+//      The topology parameters (gpus_per_server, nics_per_server, etc.) are
+//      divided among the TP/EP partitions that co-exist on the same server.
+//   2. Apply an efficiency ratio (cal_ratio) that corrects for small-message
+//      and topology effects not captured by the peak bandwidth model.
+//   3. Convert: time = data_size / (ratio * busbw) * alpha_factor
+//      where alpha_factor = 2*(N-1)/N for All-Reduce (two-pass ring),
+//                         = (N-1)/N   for one-pass collectives.
+//
+// For small messages (< 1 MB), empirical fixed latencies are used instead
+// because the bandwidth model breaks down in the latency-dominated regime.
 Tick Layer::compute_time(
     ComType comtype,
     int tp_size,
@@ -959,7 +1088,6 @@ Tick Layer::compute_time(
     return 0;
   }
 
-
     int n_ranks;
     int nnics;
     uint32_t  gpus_per_server = param->net_work_param.gpus_per_server;
@@ -972,6 +1100,8 @@ Tick Layer::compute_time(
     float bw_ratio = 1.0;
     BusBwResult result;
 
+    // Small-message regime: use empirical latency table indexed by rank count.
+    // These constants approximate kernel launch + rendezvous overhead (in ns).
     if (1 < data_size && data_size < 1048576){
       if(nranks == 2) comp_time = 10000;
       if(nranks == 4) comp_time = 12000;
@@ -982,8 +1112,10 @@ Tick Layer::compute_time(
       if(nranks == 128) comp_time = 320000;
       return comp_time;
     }
+  // Large-message regime: compute effective busbw for the collective's topology.
   if (group_type == MockNccl::GroupType::TP ){
-      //TP_comm_inside
+      // TP comm: if all TP ranks sit on the same server, use intra-server NVLink
+      // bandwidth (node_count=1); otherwise scale to multi-node.
       if(tp_size <= gpus_per_server){
       result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,nics_per_server,1,coll_type,tp_size,nic_type);
       }else{
@@ -992,6 +1124,9 @@ Tick Layer::compute_time(
       }
     }else if (group_type == MockNccl::GroupType::EP && nranks > 1)
     {
+      // EP comm (expert parallelism, typically all-to-all).
+      // Each server hosts tp_size TP ranks, so the available EP footprint per
+      // server is gpus_per_server / tp_size GPUs.
      if(tp_size * nranks <= gpus_per_server){
       uint32_t _temp_gpus_per_server = gpus_per_server / tp_size;
       result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,nics_per_server,1,coll_type,_temp_gpus_per_server,nic_type);
@@ -1003,54 +1138,69 @@ Tick Layer::compute_time(
       result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,_temp_nics_per_server,_node_count,coll_type,_temp_gpus_per_server,nic_type);
      }
     }else if(group_type == MockNccl::GroupType::DP && nranks > 1){
+      // DP comm: nranks DP replicas, each with tp_size GPUs co-located on-server.
+      // Divide server resources by tp_size to get the per-DP-replica share.
       if(tp_size <= gpus_per_server){
         uint32_t _temp_gpus_per_server = gpus_per_server / tp_size;
         float _temp_nics_per_server = nics_per_server / tp_size;
         result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,_temp_nics_per_server,nranks,coll_type,_temp_gpus_per_server,nic_type);
       }else{
+        // TP spans multiple servers; each server has 1 DP rank effectively.
         float _temp_nics_per_server = nics_per_server / gpus_per_server;
         result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,_temp_nics_per_server,nranks,coll_type,1,nic_type);
       }
     }else if(group_type == MockNccl::GroupType::DP_EP && nranks > 1){
+      // DP_EP: expert-parallel DP; further divide server resources by EP size.
       if(tp_size * ep_size <= gpus_per_server){
         float _temp_nics_per_server = nics_per_server / (tp_size * ep_size);
         uint32_t _temp_gpus_per_server = gpus_per_server / (tp_size * ep_size);
         result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,_temp_nics_per_server,nranks,coll_type,_temp_gpus_per_server,nic_type);
-       
       }else{
         float _temp_nics_per_server = nics_per_server / gpus_per_server;
         result = cal_busbw(gpu_type,nvlink_bw,bw_per_nic,_temp_nics_per_server,nranks,coll_type,1,nic_type);
       }
     }else{
-      
       comp_time = 0;
       return comp_time;
     }
-    
+
+    // Apply the empirical efficiency correction for this message size and topology.
     bw_ratio = cal_ratio(data_size,nranks,tp_size,gpus_per_server,group_type,coll_type,result.is_nvlink);
     cout<<"Communication Type: "<<coll_type<<"Communication Group: "<<group_type<<"Group Size: "<< nranks<<"Data Size: "<<data_size<<"Ratio: "<<bw_ratio<<"Bottleneck is nvlink: "<<result.is_nvlink<<endl;
+    // time = data / effective_bw * alpha, where alpha accounts for ring steps.
+    // All-Reduce = 2*(N-1)/N (reduce-scatter + all-gather).
+    // Other collectives = (N-1)/N (single ring pass).
     if(comtype == ComType::All_Reduce){
-      comp_time = data_size * GBps / (bw_ratio * result.busbw) * 1e9 * 2 * 
+      comp_time = data_size * GBps / (bw_ratio * result.busbw) * 1e9 * 2 *
             (nranks - 1) / (nranks / 1.0);
-            
     } else {
-      comp_time = data_size * GBps / (bw_ratio * result.busbw) * 1e9  * 
+      comp_time = data_size * GBps / (bw_ratio * result.busbw) * 1e9  *
             (nranks - 1) / (nranks / 1.0);
-             
     }
-    
+
   return comp_time;
 }
 
+// compute_busbw() derives algorithm bandwidth (algbw) and bus bandwidth
+// (busbw) from a measured total communication time and message size.
+//   algbw = data_size / time           (raw throughput on the link)
+//   busbw = algbw * alpha              (effective bandwidth accounting for
+//                                       how many times data traverses the bus)
+//
+// The alpha factor matches the ring-algorithm traffic pattern:
+//   All-Reduce:  2*(N-1)/N  (reduce-scatter + all-gather, each N-1 steps)
+//   Others:      (N-1)/N    (single ring pass)
+//
+// Units: data_size in bytes, total_comm in ticks (ns), result in GB/s.
 std::pair<float,float> Layer::compute_busbw(ComType comtype, int nranks, uint64_t data_size,Tick total_comm){
   float algbw = data_size / (total_comm / FREQ) * 1000000 * GBps;
   float busbw = 0.0;
   if (comtype == ComType::All_Reduce) {
     busbw = algbw * 2 * (nranks - 1) / (nranks / 1.0);
   } else if (
-      comtype == ComType::All_Gather || 
+      comtype == ComType::All_Gather ||
       comtype == ComType::Reduce_Scatter ||
-      comtype == ComType::Broadcast ||  // sepehr
+      comtype == ComType::Broadcast ||
       comtype == ComType::All_to_All) {
     busbw = algbw * (nranks - 1) / (nranks / 1.0);
   } else {
@@ -1059,17 +1209,36 @@ std::pair<float,float> Layer::compute_busbw(ComType comtype, int nranks, uint64_
 
   return std::make_pair(algbw,busbw);
 }
+// issue_forward_pass_comm() launches the forward-pass collective for this layer.
+//
+// In ANALYTI (pure analytical) mode, no actual network simulation is performed;
+// the function just advances the workload immediately if blocking.
+//
+// In PHY_MTP (physical multi-tenant) mode, the event callback (EventType::Fwd_Comm_Finished)
+// and 'this' notifier are passed directly to the generator so the simulation
+// can fire the completion event when the collective finishes.
+//
+// In the default (NS3 / mock) mode, the DataSet is stored in fwd_pass_datasets
+// keyed by its ID, and set_notifier() registers Layer::call() as the callback.
+//
+// If fwd_pass_comm_type == None, the collective is skipped and the workload
+// is advanced immediately (if barrier is Blocking) so the scheduler can proceed.
 void Layer::issue_forward_pass_comm(
     SchedulingPolicy pref_scheduling,
     CollectiveBarrier barrier) {
+  
   MockNcclLog* NcclLog = MockNcclLog::getInstance();
 
   if (generator->id == 0)
-      std::cout << "issue_forward_pass_comm called:" << std::endl << 
-        "\t SchedulingPolicy: " << static_cast<int>(pref_scheduling) << std::endl << 
-        "\t barrier: " << static_cast<int>(barrier) << std::endl;
+      std::cout << "issue_forward_pass_comm called:" << std::endl <<
+        "\t SchedulingPolicy: " << scheduling_policy_to_string(pref_scheduling) << std::endl <<
+        "\t barrier: " << barrier_to_string(barrier) << std::endl <<
+        "\t fwd_pass_comm_type: " << comtype_to_string(fwd_pass_comm_type) << std::endl <<
+        "\t fwd_pass_comm_size: " << fwd_pass_comm_size << std::endl <<
+        "\t layer_num: " << layer_num << std::endl;
 
   #ifdef ANALYTI
+    // Analytical mode: record the barrier type and return without simulation.
     fwd_barrier = barrier;
     if (generator->id == 0){
       NcclLog->writeLog(
@@ -1280,10 +1449,12 @@ void Layer::issue_forward_pass_comm(
   #endif
   NcclLog->writeLog(NcclLogLevel::DEBUG,"Fwd_Comm_Finished set_notifier success");
 }
+// issue_input_grad_comm() launches the input-gradient (backward TP) collective.
+// Structure mirrors issue_forward_pass_comm(); see that function for details.
 void Layer::issue_input_grad_comm(
     SchedulingPolicy pref_scheduling,
     CollectiveBarrier barrier) {
-  MockNcclLog* NcclLog = MockNcclLog::getInstance();  
+  MockNcclLog* NcclLog = MockNcclLog::getInstance();
   #ifdef ANALYTI
   ig_barrier = barrier;
   if (generator->id == 0){
@@ -1496,6 +1667,9 @@ void Layer::issue_input_grad_comm(
   ig->set_notifier(this, EventType::Input_Grad_Comm_Finished);
   #endif
 }
+// issue_weight_grad_comm() launches the weight-gradient (DP all-reduce /
+// reduce-scatter) collective for synchronising parameter updates across
+// data-parallel replicas. Structure mirrors issue_forward_pass_comm().
 void Layer::issue_weight_grad_comm(
     SchedulingPolicy pref_scheduling,
     CollectiveBarrier barrier) {

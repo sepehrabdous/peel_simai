@@ -1261,7 +1261,7 @@ DataSet* Sys::generate_broadcast(
         "\t size: " << size << std::endl << 
         "\t involved_dimensions.size: " << involved_dimensions.size() << std::endl <<
         "\t layer: " << layer << std::endl <<
-        "\t event: " << static_cast<int>(event) << std::endl;
+        "\t event: " << event_to_string(event) << std::endl;
   
   return generate_collective(
       size,
@@ -1411,17 +1411,17 @@ CollectivePhase Sys::generate_collective_phase(
     CollectiveImplementation* collective_implementation,
     bool boost_mode) {
 
-        if (id == 0)
-          std::cout << "generate_collective_phase called:" << std::endl << 
-            "\tcollective_type: " << static_cast<int>(collective_type) << std::endl <<
-            "\tlayer_num: " << layer_num << std::endl << 
-            "\tdata_size: " << data_size << std::endl << 
-            "\tqueue_id: " << queue_id << std::endl << 
-            "\tdirection: " << static_cast<int>(direction) << std::endl <<
-            "\tinjection_policy: " << static_cast<int>(injection_policy) << std::endl <<
-            "\tcollective_implementation->type: " << static_cast<int>(collective_implementation->type) << std::endl <<
-            "\tworkload->current_state: " << static_cast<int>(workload->current_state) << std::endl <<
-            "\tboost_mode: " << boost_mode << std::endl;
+        std::cout << "generate_collective_phase called:" << std::endl << 
+          "\tcollective_type: " << comtype_to_string(collective_type) << std::endl <<
+          "\tlayer_num: " << layer_num << std::endl << 
+          "\tdata_size: " << data_size << std::endl << 
+          "\tqueue_id: " << queue_id << std::endl << 
+          "\tdirection: " << static_cast<int>(direction) << std::endl <<
+          "\tinjection_policy: " << injection_policy_to_string(injection_policy) << std::endl <<
+          "\tcollective_implementation->type: " << collective_implementation_type_to_string(collective_implementation->type) << std::endl <<
+          "\tworkload->current_state: " << workload->loopstate_to_string(workload->current_state) << std::endl <<
+          "\tboost_mode: " << boost_mode << std::endl <<
+          "----------------------\n" << std::endl;
 
         MockNcclLog* NcclLog = MockNcclLog::getInstance();
 
@@ -1796,12 +1796,7 @@ DataSet* Sys::generate_collective(
     EventType event,
     Callable* layer_ptr ) {
 
-  if (id == 0)
-      std::cout << "generate_collective called... Info:" << std::endl;
-
   uint64_t chunk_size = determine_chunk_size(size, collective_type);
-  if(id == 0) 
-    std::cout << "\t chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl;
   uint64_t recommended_chunk_size = chunk_size;
   int streams = ceil(((double)size) / chunk_size);
   int64_t tmp;
@@ -1812,14 +1807,16 @@ DataSet* Sys::generate_collective(
   }
   #endif
   int pri = get_priority(pref_scheduling);
-  if (id == 0) {
-    std::cout << "\t Priority: " << pri << std::endl;
-    std::cout << "\ttopology->get_num_of_dimensions: " << topology->get_num_of_dimensions() << std::endl;
-    std::cout << "\tinter_dimension_scheduling: " << static_cast<int>(inter_dimension_scheduling) << std::endl;
-    std::cout << "\tlast_scheduled_collective: " << static_cast<int>(last_scheduled_collective) << std::endl;
-    std::cout << "\tcollective_type: " << static_cast<int>(collective_type) << std::endl;
-    std::cout << "\tcollectiveOptimization: " << static_cast<int>(collectiveOptimization) << std::endl;
-  }
+
+  std::cout << "generate_collective called... Info:" << std::endl <<
+    "\t chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl <<
+    "\t Priority: " << pri << std::endl <<
+    "\t topology->get_num_of_dimensions: " << topology->get_num_of_dimensions() << std::endl <<
+    "\t inter_dimension_scheduling: " << inter_dimension_scheduling_to_string(inter_dimension_scheduling) << std::endl <<
+    "\t last_scheduled_collective (time): " << static_cast<int>(last_scheduled_collective) << std::endl <<
+    "\t collective_type: " << comtype_to_string(collective_type) << std::endl <<
+    "\t collectiveOptimization: " << collective_optimization_to_string(collectiveOptimization) << std::endl;
+  
 
   int count = 0;
   if (id == 0 &&
@@ -1874,9 +1871,6 @@ DataSet* Sys::generate_collective(
              InterDimensionScheduling::OfflineGreedyFlex)) {
       size -= chunk_size;
     }
-
-    if (id == 0)
-      std::cout << "chunk size: " << chunk_size << ", remaining size: " << size << std::endl;
 
     tmp = chunk_size;
     std::list<CollectivePhase> vect;
@@ -2030,13 +2024,16 @@ DataSet* Sys::generate_collective(
         tmp = phase.final_data_size;
       }
     }
+    
     if (vect.size() > 0) {
+      std::cout << "vect.size: " << vect.size() << std::endl;
       StreamBaseline* newStream =
           new StreamBaseline(this, dataset, stream_counter++, vect, pri);
       newStream->current_queue_id = -1;
       #ifdef PHY_MTP
       insert_into_running_list(newStream);
       #endif
+      std::cout << "Adding the new stream to the ready_list" << std::endl;
       insert_into_ready_list(newStream);
       MockNcclLog* NcclLog = MockNcclLog::getInstance();
       NcclLog->writeLog(NcclLogLevel::DEBUG,"Sys::generate_collective finished");
@@ -2366,8 +2363,11 @@ void Sys::try_register_event(
 
   if (id == 0)
     std::cout << "try_register_event called!" << std::endl << 
-       "\t event: " << static_cast<int>(event)  << std::endl << 
-       "\t cycles: " << cycles  << std::endl;
+       "\t id: " << id  << std::endl << 
+       "\t event: " << event_to_string(event)  << std::endl << 
+       "\t cycles: " << cycles  << std::endl << 
+       "\t ticks passed: " << Sys::boostedTick() << std::endl << 
+       "------------------------\n" << std::endl;
 
   bool should_schedule = false;
   {

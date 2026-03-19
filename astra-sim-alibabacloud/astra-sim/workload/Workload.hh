@@ -56,6 +56,16 @@ class Workload : Callable {
     Wait_For_Sim_Finish,
     Forward_In_BackPass
   };
+  static constexpr std::string_view loopstate_to_string(LoopState state) {
+    switch (state) {
+      case LoopState::Forward_Pass: return "Forward_Pass";
+      case LoopState::Weight_Gradient: return "Weight_Gradient";
+      case LoopState::Input_Gradient: return "Input_Gradient";
+      case LoopState::Wait_For_Sim_Finish: return "Wait_For_Sim_Finish";
+      case LoopState::Forward_In_BackPass: return "Forward_In_BackPass";
+    }
+    return "Unknown LoopState";
+  }
   ~Workload();
   Layer** layers;
   int SIZE;
