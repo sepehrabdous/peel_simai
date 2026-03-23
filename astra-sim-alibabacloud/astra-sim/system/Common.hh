@@ -161,6 +161,25 @@ enum class StreamState {
   Zombie,
   Dead
 };
+static const char* stream_state_to_string(StreamState state) {
+  switch (state) {
+    case StreamState::Created:
+      return "Created";
+    case StreamState::Transferring:
+      return "Transferring";
+    case StreamState::Ready:
+      return "Ready";
+    case StreamState::Executing:
+      return "Executing";
+    case StreamState::Zombie:
+      return "Zombie";
+    case StreamState::Dead:
+      return "Dead";
+    default:
+      return "Unknown";
+  }
+}
+
 enum class EventType {
   NONE,
   RendezvousSend,

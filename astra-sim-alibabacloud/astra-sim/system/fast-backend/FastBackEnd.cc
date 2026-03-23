@@ -381,8 +381,16 @@ int FastBackEnd::sim_send(
     sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
+
   auto src = sim_comm_get_rank();
   auto srcDestPair = std::make_pair(src, dst);
+
+  std::cout << "FastBackEnd::sim_send called:" << std::endl
+          << "\t count=" << count << std::endl
+          << "\t type=" << type << std::endl
+          << "\t src=" << src << std::endl
+          << "\t dst=" << dst << std::endl
+          << "\t tag=" << tag << std::endl;
 
   auto inflightPair = inflightPairsMap.pop(src, dst, tag, count);
 

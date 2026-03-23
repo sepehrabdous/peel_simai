@@ -227,6 +227,15 @@ int RingBroadcast::completion_ack_tag() const {
 // ring has forwarded all chunks, it calls send_completion_ack(), which
 // triggers a PacketReceived event on root with this tag.
 void RingBroadcast::post_completion_ack_recv() {
+
+  std::cout << "post_completion_ack_recv called:" << std::endl <<
+      "\t node=" << stream->owner->id << std::endl <<
+      "\t current_sender=" << current_sender << std::endl <<
+      "\t completion_ack_tag=" << completion_ack_tag() << std::endl <<
+      "\t queue_id=" << stream->current_queue_id << std::endl <<
+      "\t layer_num=" << layer_num << std::endl <<
+      "\t completion_ack_posted=" << completion_ack_posted << std::endl;
+      
   if (!enabled || !is_root() || completion_ack_posted) {
     return;
   }
@@ -293,13 +302,26 @@ void RingBroadcast::send_completion_ack() {
 // recv_chunk_posted != -1).  When the chunk arrives, the simulator fires
 // EventType::PacketReceived on this node.
 void RingBroadcast::post_data_recv(int chunk_idx) {
+
+  std::cout << "post_data_recv called:" << std::endl <<
+      "\t node=" << stream->owner->id << std::endl <<
+      "\t chunk_idx=" << chunk_idx << std::endl <<
+      "\t current_sender=" << current_sender << std::endl <<
+      "\t chunk_tag=" << chunk_tag(chunk_idx) << std::endl <<
+      "\t queue_id=" << stream->current_queue_id << std::endl <<
+      "\t recv_chunk_posted=" << recv_chunk_posted << std::endl;
+
   if (!enabled || is_root()) {
+    std::cout << "Root never receives broadcast data; it only receives the ACK"  << std::endl;
     return;  // Root never receives broadcast data; it only receives the ACK.
   }
+
   if (chunk_idx < 0 || chunk_idx >= num_chunks) {
+    std::cout << "chunk_idx < 0 || chunk_idx >= num_chunks"  << std::endl;
     return;
   }
   if (recv_chunk_posted != -1) {
+    std::cout << "recv_chunk_posted != -1 --> A recv is already outstanding; only one at a time" << std::endl; 
     return;  // A recv is already outstanding; only one at a time.
   }
 
@@ -343,6 +365,16 @@ void RingBroadcast::post_data_recv(int chunk_idx) {
 // packetization completes, EventType::General fires and free_packets is
 // incremented, unblocking ready().
 void RingBroadcast::stage_data_packet(int chunk_idx, bool from_npu) {
+
+  std::cout << "stage_data_packet called:" << std::endl <<
+      "\t node=" << stream->owner->id << std::endl <<
+      "\t chunk_idx=" << chunk_idx << std::endl <<
+      "\t from_npu=" << from_npu << std::endl <<
+      "\t current_receiver=" << current_receiver << std::endl <<
+      "\t chunk_tag=" << chunk_tag(chunk_idx) << std::endl <<
+      "\t queue_id=" << stream->current_queue_id << std::endl <<
+      "\t chunks_staged=" << chunks_staged << std::endl;
+
   if (!enabled) {
     return;
   }
@@ -374,11 +406,22 @@ void RingBroadcast::stage_data_packet(int chunk_idx, bool from_npu) {
 // it will fire EventType::General which increments free_packets and allows
 // ready() to dispatch the packet to the network.
 void RingBroadcast::release_packets(uint64_t packet_size) {
+
+  std::cout << "release_packets called:" << std::endl <<
+      "\t node=" << stream->owner->id << std::endl <<
+      "\t packet_size=" << packet_size << std::endl <<
+      "\t send_from_npu=" << send_from_npu << std::endl <<
+      "\t current_receiver=" << current_receiver << std::endl <<
+      "\t queue_id=" << stream->current_queue_id << std::endl <<
+      "\t chunks_staged=" << chunks_staged << std::endl <<
+      "\t locked_packets.size()=" << locked_packets.size() << std::endl;
+
   for (auto packet : locked_packets) {
     packet->set_notifier(this);
   }
 
   if (send_from_npu == true) {
+    std::cout << "send_to_MA" << std::endl;
     (new PacketBundle(stream->owner,
                       stream,
                       locked_packets,
@@ -388,6 +431,7 @@ void RingBroadcast::release_packets(uint64_t packet_size) {
                       transmition))
         ->send_to_MA();
   } else {
+    std::cout << "send_to_NPU" << std::endl;
     (new PacketBundle(stream->owner,
                       stream,
                       locked_packets,
@@ -414,6 +458,7 @@ bool RingBroadcast::ready() {
   }
 
   if (!enabled || packets.empty() || free_packets == 0) {
+    std::cout << "RingBroadcast::ready called and !enabled || packets.empty() || free_packets == 0" << std::endl;
     return false;
   }
 
@@ -430,6 +475,21 @@ bool RingBroadcast::ready() {
   snd_req.reqType = UINT8;
   snd_req.vnet = this->stream->current_queue_id;
   snd_req.layerNum = layer_num;
+
+  std::cout << "RingBroadcast::ready called! Sending packet:" << std::endl
+          << "\t src=" << snd_req.srcRank << std::endl
+          << "\t dst=" << snd_req.dstRank << std::endl
+          << "\t stream_num=" << stream->stream_num << std::endl
+          << "\t stream_state=" << stream_state_to_string(stream->state) << std::endl
+          << "\t enabled=" << enabled << std::endl
+          << "\t free_packets=" << free_packets << std::endl
+          << "\t packets.size()=" << packets.size() << std::endl
+          << "\t packet_chunks.size()=" << packet_chunks.size() << std::endl
+          << "\t queue_id=" << this->stream->current_queue_id << std::endl
+          << "\t layer_num=" << layer_num << std::endl
+          << "\t chunk_idx=" << chunk_idx << std::endl
+          << "\t bytes=" << bytes << std::endl
+          << "\t current_tick=" << Sys::boostedTick() << std::endl;
 
   stream->owner->front_end_sim_send(
       0,
@@ -534,6 +594,9 @@ void RingBroadcast::maybe_exit() {
 //     Root: arms the completion-ACK recv and stages the first data chunk.
 //     Others: arm the recv for the first data chunk.
 void RingBroadcast::run(EventType event, CallData* data) {
+
+  std::cout << "RingBroadcast::run called for id=" << stream->owner->id << " and event=" << event_to_string(event) << std::endl;
+
   if (event == EventType::General) {
     // Memory bus finished packetizing; one more packet is now sendable.
     free_packets += 1;
@@ -609,10 +672,12 @@ void RingBroadcast::run(EventType event, CallData* data) {
     if (is_root()) {
       // Arm the completion-ACK recv first so it is ready before any data
       // could possibly complete.  Then kick off chunk 0.
+      std::cout << "StreamInit called for root!" << std::endl;
       post_completion_ack_recv();
       stage_data_packet(0, true);
     } else {
       // Non-root: arm the recv for chunk 0 and advance the posting pointer.
+      std::cout << "StreamInit called for non-root!" << std::endl;
       post_data_recv(next_chunk_to_post);
       if (recv_chunk_posted != -1) {
         next_chunk_to_post++;

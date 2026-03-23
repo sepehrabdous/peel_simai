@@ -637,7 +637,22 @@ int Sys::sim_send(
     sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
+  
+  std::cout << "Sys::sim_send called:" << std::endl
+            << "\t node=" << id << std::endl
+            << "\t delay=" << delay << std::endl
+            << "\t buffer=" << buffer << std::endl
+            << "\t count=" << count << std::endl
+            << "\t type=" << type << std::endl
+            << "\t dst=" << dst << std::endl
+            << "\t tag=" << tag << std::endl
+            << "\t request=" << request << std::endl
+            << "\t current_tick=" << Sys::boostedTick() << std::endl;
+
   if (delay == 0 && fun_arg == nullptr) {
+
+    std::cout << "delay == 0 && fun_arg == nullptr" << std::endl;
+    
     Sys::sysCriticalSection cs;
       
     SendPacketEventHandlerData* fun_arg_tmp =
@@ -702,6 +717,21 @@ int Sys::front_end_sim_send(
     sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
+
+  std::cout << "Sys::front_end_sim_send called:" << std::endl
+            << "\t node=" << id << std::endl
+            << "\t delay=" << delay << std::endl
+            << "\t buffer=" << buffer << std::endl
+            << "\t count=" << count << std::endl
+            << "\t type=" << type << std::endl
+            << "\t dst=" << dst << std::endl
+            << "\t tag=" << tag << std::endl
+            << "\t request=" << request << std::endl
+            << "\t msg_handler=" << reinterpret_cast<void*>(msg_handler) << std::endl
+            << "\t fun_arg=" << fun_arg << std::endl
+            << "\t rendezvous_enabled=" << rendezvous_enabled << std::endl
+            << "\t current_tick=" << Sys::boostedTick() << std::endl;
+
   if (rendezvous_enabled) {
     return rendezvous_sim_send(
         delay, buffer, count, type, dst, tag, request, msg_handler, fun_arg);
@@ -787,6 +817,16 @@ int Sys::front_end_sim_recv(
     sim_request* request,
     void (*msg_handler)(void* fun_arg),
     void* fun_arg) {
+  
+  std::cout << "front_end_sim_recv called:" << std::endl <<
+        "\t node=" << id << std::endl <<
+        "\t src=" << src << std::endl << 
+        "\t tag=" << tag << std::endl <<
+        "\t count=" << count << std::endl << 
+        "\t type=" << type << std::endl <<
+        "\t delay=" << delay << std::endl <<
+        "\t rendezvous=" << rendezvous_enabled << std::endl;
+
   if (rendezvous_enabled) {
     return rendezvous_sim_recv(
         delay, buffer, count, type, src, tag, request, msg_handler, fun_arg);
@@ -1412,6 +1452,7 @@ CollectivePhase Sys::generate_collective_phase(
     bool boost_mode) {
 
         std::cout << "generate_collective_phase called:" << std::endl << 
+          "\t ID: " << id << std::endl <<
           "\tcollective_type: " << comtype_to_string(collective_type) << std::endl <<
           "\tlayer_num: " << layer_num << std::endl << 
           "\tdata_size: " << data_size << std::endl << 
@@ -1809,6 +1850,7 @@ DataSet* Sys::generate_collective(
   int pri = get_priority(pref_scheduling);
 
   std::cout << "generate_collective called... Info:" << std::endl <<
+    "\t ID: " << id << std::endl <<
     "\t chunk size is: " << chunk_size << " , size is: " << size << " , layer_num is: " << layer_num << " , node: " << id << std::endl <<
     "\t Priority: " << pri << std::endl <<
     "\t topology->get_num_of_dimensions: " << topology->get_num_of_dimensions() << std::endl <<

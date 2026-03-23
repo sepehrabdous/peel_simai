@@ -182,6 +182,13 @@ public:
     t.type = 0;      // type 0 = send
     t.fun_arg = fun_arg;
     t.msg_handler = msg_handler;
+
+    std::cout << "AstraNetworkAPI::sim_send called:" << std::endl
+            << "\t count=" << count << std::endl
+            << "\t type=" << type << std::endl
+            << "\t dst=" << dst << std::endl
+            << "\t tag=" << tag << std::endl;
+
     {
       #ifdef NS3_MTP
       MtpInterface::explicitCriticalSection cs;
@@ -194,6 +201,7 @@ public:
     SendFlow(rank, dst, count, msg_handler, fun_arg, tag, request);
     return 0;
   }
+
   // Registers an expectation to receive 'count' bytes from 'src' on 'tag'.
   // Because NS3 flows can complete before the upper layer calls sim_recv(),
   // this function must handle two orderings:
